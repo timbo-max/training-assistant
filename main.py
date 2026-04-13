@@ -57,11 +57,11 @@ def sync_garmin():
             "date":               d,
             "name":               a.get("activityName"),
             "sport_type":         a.get("activityType", {}).get("typeKey"),
-            "duration_seconds":   int(a.get("duration", 0)),
+            "duration_seconds":   int(a.get("duration", 0) or 0),
             "distance_km":        round((a.get("distance") or 0) / 1000, 2),
-            "avg_hr":             a.get("averageHR"),
-            "max_hr":             a.get("maxHR"),
-            "elevation_gain_m":   a.get("elevationGain"),
+            "avg_hr":             int(a.get("averageHR")) if a.get("averageHR") else None,
+            "max_hr":             int(a.get("maxHR")) if a.get("maxHR") else None,
+            "elevation_gain_m":   float(a.get("elevationGain")) if a.get("elevationGain") else None,
             "garmin_activity_id": str(a.get("activityId")),
         }, on_conflict="garmin_activity_id").execute()
 
