@@ -203,8 +203,14 @@ def telegram():
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     user_msg = message.get("text", "")
+    allowed_id = int(os.environ["TELEGRAM_USER_ID"])
+    user_id = message.get("from", {}).get("id")
 
     if not chat_id or not user_msg:
+        return "ok", 200
+
+    if user_id != allowed_id:
+        send_telegram(chat_id, "Sorry, you are not authorised to use this bot.")
         return "ok", 200
 
     week_ago   = (date.today() - timedelta(days=7)).isoformat()
