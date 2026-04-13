@@ -4,3 +4,4 @@ supabase
 anthropic
 twilio
 gunicorn
+icalendar
