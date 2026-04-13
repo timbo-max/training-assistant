@@ -6,7 +6,6 @@ from flask import Flask, request
 from garminconnect import Garmin
 from supabase import create_client
 from anthropic import Anthropic
-from twilio.twiml.messaging_response import MessagingResponse
 from icalendar import Calendar
 
 app = Flask(__name__)
@@ -33,6 +32,13 @@ def get_garmin():
         _garmin = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
         _garmin.login()
     return _garmin
+
+def send_telegram(chat_id, text):
+    token = os.environ["TELEGRAM_TOKEN"]
+    requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": text}
+    )
 
 def extract_splits(garmin, activity_id):
     try:
@@ -188,11 +194,18 @@ def backfill():
 
     return f"Backfill complete — activities imported for {len(results)} days", 200
 
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp():
+@app.route("/telegram", methods=["POST"])
+def telegram():
     db = get_supabase()
     ai = get_anthropic()
-    user_msg = request.form.get("Body", "")
+
+    data = request.json
+    message = data.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    user_msg = message.get("text", "")
+
+    if not chat_id or not user_msg:
+        return "ok", 200
 
     week_ago   = (date.today() - timedelta(days=7)).isoformat()
     wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
@@ -222,9 +235,8 @@ When asked about pace or splits, reference the per km split data directly."""
     )
 
     reply = response.content[0].text
-    twiml = MessagingResponse()
-    twiml.message(reply)
-    return str(twiml), 200, {"Content-Type": "text/xml"}
+    send_telegram(chat_id, reply)
+    return "ok", 200
 
 @app.route("/", methods=["GET"])
 def health():
