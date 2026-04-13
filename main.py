@@ -1,11 +1,13 @@
 import os
 import json
-from datetime import date, timedelta
+import requests
+from datetime import date, timedelta, datetime
 from flask import Flask, request
 from garminconnect import Garmin
 from supabase import create_client
 from anthropic import Anthropic
 from twilio.twiml.messaging_response import MessagingResponse
+from icalendar import Calendar
 
 app = Flask(__name__)
 
@@ -65,11 +67,48 @@ def sync_garmin():
             "garmin_activity_id": str(a.get("activityId")),
         }, on_conflict="garmin_activity_id").execute()
 
-    print(f"Sync complete for {d}")
+    print(f"Garmin sync complete for {d}")
+
+def sync_trainingpeaks():
+    db = get_supabase()
+    ical_url = os.environ["TRAININGPEAKS_ICAL_URL"]
+
+    response = requests.get(ical_url)
+    cal = Calendar.from_ical(response.content)
+
+    today = date.today()
+    window_start = today - timedelta(days=7)
+    window_end   = today + timedelta(days=7)
+
+    for component in cal.walk():
+        if component.name != "VEVENT":
+            continue
+
+        dtstart = component.get("DTSTART")
+        if not dtstart:
+            continue
+
+        event_date = dtstart.dt
+        if hasattr(event_date, "date"):
+            event_date = event_date.date()
+
+        if not (window_start <= event_date <= window_end):
+            continue
+
+        summary     = str(component.get("SUMMARY", ""))
+        description = str(component.get("DESCRIPTION", ""))
+
+        db.table("training_load").upsert({
+            "date":             event_date.isoformat(),
+            "planned_workout":  f"{summary} — {description}".strip(" —"),
+        }, on_conflict="date").execute()
+
+    print("TrainingPeaks sync complete")
 
 @app.route("/sync", methods=["GET"])
 def trigger_sync():
     sync_garmin()
+    sync_trainingpeaks()
     return "Sync done", 200
 
 @app.route("/whatsapp", methods=["POST"])
@@ -81,17 +120,22 @@ def whatsapp():
     week_ago   = (date.today() - timedelta(days=7)).isoformat()
     wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     activities = db.table("activities").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    training   = db.table("training_load").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
     context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
 
 WELLNESS (HRV, sleep, Body Battery, resting HR):
 {json.dumps(wellness, indent=2, default=str)}
 
-ACTIVITIES (runs, rides, etc.):
+ACTIVITIES completed (runs, rides, etc.):
 {json.dumps(activities, indent=2, default=str)}
 
+TRAINING PLAN (planned workouts from coach):
+{json.dumps(training, indent=2, default=str)}
+
 Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
-If data is missing for a day, mention it. Give practical training advice based on recovery trends."""
+If data is missing for a day, mention it. Give practical training advice based on recovery trends.
+Always consider the planned workout for today when giving advice."""
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
