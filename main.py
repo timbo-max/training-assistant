@@ -275,6 +275,23 @@ def trigger_sync():
     sync_trainingpeaks()
     return "Sync done", 200
 
+@app.route("/sync-date", methods=["GET"])
+def sync_specific_date():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    d = request.args.get("date")
+    if not d:
+        return "Please provide a date parameter e.g. ?date=2026-04-13", 400
+    try:
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return "Invalid date format. Use YYYY-MM-DD e.g. ?date=2026-04-13", 400
+    db     = get_supabase()
+    garmin = get_garmin()
+    sync_day(garmin, db, d)
+    sync_trainingpeaks()
+    return f"Sync done for {d}", 200
+
 @app.route("/weekly-summary", methods=["GET"])
 def weekly_summary():
     if not check_sync_auth():
