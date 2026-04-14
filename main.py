@@ -468,7 +468,18 @@ def backfill():
             print(f"Failed for {d}: {e}")
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
-
+    
+@app.route("/debug-activity", methods=["GET"])
+def debug_activity():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    activity_id = request.args.get("id")
+    if not activity_id:
+        return "Please provide ?id=your_garmin_activity_id", 400
+    garmin = get_garmin()
+    details = garmin.get_activity(int(activity_id))
+    return json.dumps(details, indent=2, default=str), 200
+    
 @app.route("/strava", methods=["GET", "POST"])
 def strava():
     if request.method == "GET":
