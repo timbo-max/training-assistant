@@ -44,6 +44,10 @@ def send_telegram_to_me(text):
     chat_id = os.environ["TELEGRAM_USER_ID"]
     send_telegram(chat_id, text)
 
+def check_sync_auth():
+    token = request.args.get("token") or request.headers.get("X-Sync-Token")
+    return token == os.environ.get("SYNC_SECRET")
+
 def extract_splits(garmin, activity_id):
     try:
         splits = garmin.get_activity_splits(activity_id)
@@ -75,11 +79,11 @@ def extract_weather(garmin, activity_id):
         if not weather:
             return None
         return {
-            "temp_c":      weather.get("temperature"),
-            "humidity":    weather.get("relativeHumidity"),
-            "conditions":  weather.get("weatherDescriptor"),
-            "wind_speed":  weather.get("windSpeed"),
-            "feels_like":  weather.get("apparentTemperature"),
+            "temp_c":     weather.get("temperature"),
+            "humidity":   weather.get("relativeHumidity"),
+            "conditions": weather.get("weatherDescriptor"),
+            "wind_speed": weather.get("windSpeed"),
+            "feels_like": weather.get("apparentTemperature"),
         }
     except Exception as e:
         print(f"Weather fetch failed for activity {activity_id}: {e}")
@@ -90,10 +94,10 @@ def score_compliance(planned, actual_activities):
         return None, None
     ai = get_anthropic()
     actual_summary = json.dumps([{
-        "name": a.get("name"),
-        "sport_type": a.get("sport_type"),
+        "name":             a.get("name"),
+        "sport_type":       a.get("sport_type"),
         "duration_seconds": a.get("duration_seconds"),
-        "distance_km": a.get("distance_km"),
+        "distance_km":      a.get("distance_km"),
     } for a in actual_activities], default=str)
 
     response = ai.messages.create(
@@ -265,12 +269,16 @@ def sync_trainingpeaks():
 
 @app.route("/sync", methods=["GET"])
 def trigger_sync():
+    if not check_sync_auth():
+        return "Unauthorised", 401
     sync_garmin()
     sync_trainingpeaks()
     return "Sync done", 200
 
 @app.route("/weekly-summary", methods=["GET"])
 def weekly_summary():
+    if not check_sync_auth():
+        return "Unauthorised", 401
     db = get_supabase()
     ai = get_anthropic()
 
@@ -309,6 +317,8 @@ Keep it under 250 words. Use plain text, no markdown."""}]
 
 @app.route("/backfill", methods=["GET"])
 def backfill():
+    if not check_sync_auth():
+        return "Unauthorised", 401
     db = get_supabase()
     garmin = get_garmin()
     today = date.today()
@@ -385,12 +395,12 @@ def telegram():
     db = get_supabase()
     ai = get_anthropic()
 
-    data    = request.json
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
+    data     = request.json
+    message  = data.get("message", {})
+    chat_id  = message.get("chat", {}).get("id")
     user_msg = message.get("text", "")
     allowed_id = int(os.environ["TELEGRAM_USER_ID"])
-    user_id = message.get("from", {}).get("id")
+    user_id  = message.get("from", {}).get("id")
 
     if not chat_id or not user_msg:
         return "ok", 200
