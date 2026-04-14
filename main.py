@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from flask import Flask, request
 from garminconnect import Garmin
 from supabase import create_client
@@ -40,6 +40,10 @@ def send_telegram(chat_id, text):
         json={"chat_id": chat_id, "text": text}
     )
 
+def send_telegram_to_me(text):
+    chat_id = os.environ["TELEGRAM_USER_ID"]
+    send_telegram(chat_id, text)
+
 def extract_splits(garmin, activity_id):
     try:
         splits = garmin.get_activity_splits(activity_id)
@@ -64,7 +68,73 @@ def extract_splits(garmin, activity_id):
         print(f"Splits fetch failed for activity {activity_id}: {e}")
         return None
 
+def extract_weather(garmin, activity_id):
+    try:
+        details = garmin.get_activity(activity_id)
+        weather = details.get("weatherAndAirQuality", {})
+        if not weather:
+            return None
+        return {
+            "temp_c":      weather.get("temperature"),
+            "humidity":    weather.get("relativeHumidity"),
+            "conditions":  weather.get("weatherDescriptor"),
+            "wind_speed":  weather.get("windSpeed"),
+            "feels_like":  weather.get("apparentTemperature"),
+        }
+    except Exception as e:
+        print(f"Weather fetch failed for activity {activity_id}: {e}")
+        return None
+
+def score_compliance(planned, actual_activities):
+    if not planned or not actual_activities:
+        return None, None
+    ai = get_anthropic()
+    actual_summary = json.dumps([{
+        "name": a.get("name"),
+        "sport_type": a.get("sport_type"),
+        "duration_seconds": a.get("duration_seconds"),
+        "distance_km": a.get("distance_km"),
+    } for a in actual_activities], default=str)
+
+    response = ai.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=200,
+        messages=[{"role": "user", "content": f"""Compare the planned workout to the actual activities completed.
+Planned: {planned}
+Actual: {actual_summary}
+Return ONLY a JSON object with two fields:
+- score: integer 0-100 (100 = perfect compliance)
+- notes: one sentence explaining the score
+Example: {{"score": 85, "notes": "Distance slightly short but effort and structure matched well."}}
+Return only the JSON, nothing else."""}]
+    )
+    try:
+        result = json.loads(response.content[0].text)
+        return result.get("score"), result.get("notes")
+    except Exception:
+        return None, None
+
+def check_hrv_alert(db, today_hrv):
+    if not today_hrv:
+        return
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    rows = db.table("daily_wellness").select("hrv_rmssd").gte("date", week_ago).execute().data
+    values = [r["hrv_rmssd"] for r in rows if r.get("hrv_rmssd")]
+    if len(values) < 3:
+        return
+    avg = sum(values) / len(values)
+    drop_pct = ((avg - today_hrv) / avg) * 100
+    if drop_pct >= 15:
+        msg = (
+            f"HRV alert — your HRV today is {today_hrv:.0f}ms, "
+            f"which is {drop_pct:.0f}% below your 7 day average of {avg:.0f}ms. "
+            f"Consider an easy day or rest."
+        )
+        send_telegram_to_me(msg)
+        print(f"HRV alert sent: {msg}")
+
 def sync_day(garmin, db, d):
+    today_hrv = None
     try:
         sleep = garmin.get_sleep_data(d)
         bb    = garmin.get_body_battery(d)
@@ -101,18 +171,27 @@ def sync_day(garmin, db, d):
             "body_battery_end":   bb[-1].get("drained") if bb else None,
             "resting_hr":         rhr_value,
         }, on_conflict="date").execute()
+
+        today_hrv = hrv_value
+
     except Exception as e:
         print(f"Wellness sync failed for {d}: {e}")
 
     try:
         activities = garmin.get_activities_by_date(d, d)
+
+        planned_row = db.table("training_load").select("planned_workout").eq("date", d).execute().data
+        planned = planned_row[0].get("planned_workout") if planned_row else None
+
         for a in activities:
             activity_id = a.get("activityId")
             sport_type  = a.get("activityType", {}).get("typeKey", "")
 
-            splits = None
+            splits  = None
+            weather = None
             if sport_type in ["running", "trail_running", "cycling", "road_biking"]:
-                splits = extract_splits(garmin, activity_id)
+                splits  = extract_splits(garmin, activity_id)
+                weather = extract_weather(garmin, activity_id)
 
             db.table("activities").upsert({
                 "date":               d,
@@ -125,9 +204,30 @@ def sync_day(garmin, db, d):
                 "elevation_gain_m":   float(a.get("elevationGain")) if a.get("elevationGain") else None,
                 "garmin_activity_id": str(activity_id),
                 "splits":             json.dumps(splits) if splits else None,
+                "weather":            json.dumps(weather) if weather else None,
             }, on_conflict="garmin_activity_id").execute()
+
+        if planned and activities:
+            score, notes = score_compliance(planned, activities)
+            if score is not None:
+                db.table("training_load").update({
+                    "workout_completed": True,
+                }).eq("date", d).execute()
+                for a in activities:
+                    db.table("activities").update({
+                        "compliance_score": score,
+                        "compliance_notes": notes,
+                    }).eq("garmin_activity_id", str(a.get("activityId"))).execute()
+                print(f"Compliance score for {d}: {score}/100 — {notes}")
+
     except Exception as e:
         print(f"Activity sync failed for {d}: {e}")
+
+    if today_hrv:
+        try:
+            check_hrv_alert(db, today_hrv)
+        except Exception as e:
+            print(f"HRV alert check failed: {e}")
 
 def sync_garmin():
     db = get_supabase()
@@ -139,14 +239,11 @@ def sync_garmin():
 def sync_trainingpeaks():
     db = get_supabase()
     ical_url = os.environ["TRAININGPEAKS_ICAL_URL"]
-
     response = requests.get(ical_url)
     cal = Calendar.from_ical(response.content)
-
     today = date.today()
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
-
     for component in cal.walk():
         if component.name != "VEVENT":
             continue
@@ -164,7 +261,6 @@ def sync_trainingpeaks():
             "date":            event_date.isoformat(),
             "planned_workout": f"{summary} — {description}".strip(" —"),
         }, on_conflict="date").execute()
-
     print("TrainingPeaks sync complete")
 
 @app.route("/sync", methods=["GET"])
@@ -172,6 +268,44 @@ def trigger_sync():
     sync_garmin()
     sync_trainingpeaks()
     return "Sync done", 200
+
+@app.route("/weekly-summary", methods=["GET"])
+def weekly_summary():
+    db = get_supabase()
+    ai = get_anthropic()
+
+    week_ago   = (date.today() - timedelta(days=7)).isoformat()
+    wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date").execute().data
+    activities = db.table("activities").select("*").gte("date", week_ago).order("date").execute().data
+    training   = db.table("training_load").select("*").gte("date", week_ago).order("date").execute().data
+
+    response = ai.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        messages=[{"role": "user", "content": f"""Write a concise weekly training summary for an athlete. Use the actual numbers.
+Structure it as:
+1. Week overview (2 sentences)
+2. Training load (sessions completed, total distance, total time)
+3. Recovery trends (HRV, sleep, Body Battery patterns)
+4. Compliance (how well planned vs actual matched)
+5. One key insight or recommendation for next week
+
+WELLNESS DATA:
+{json.dumps(wellness, indent=2, default=str)}
+
+ACTIVITIES:
+{json.dumps(activities, indent=2, default=str)}
+
+TRAINING PLAN:
+{json.dumps(training, indent=2, default=str)}
+
+Keep it under 250 words. Use plain text, no markdown."""}]
+    )
+
+    summary = response.content[0].text
+    send_telegram_to_me(f"Weekly training summary\n\n{summary}")
+    print("Weekly summary sent")
+    return "Summary sent", 200
 
 @app.route("/backfill", methods=["GET"])
 def backfill():
@@ -181,7 +315,6 @@ def backfill():
     start = today - timedelta(days=90)
     current = start
     results = []
-
     while current < today:
         d = current.isoformat()
         print(f"Backfilling activities for {d}...")
@@ -190,11 +323,11 @@ def backfill():
             for a in activities:
                 activity_id = a.get("activityId")
                 sport_type  = a.get("activityType", {}).get("typeKey", "")
-
-                splits = None
+                splits  = None
+                weather = None
                 if sport_type in ["running", "trail_running", "cycling", "road_biking"]:
-                    splits = extract_splits(garmin, activity_id)
-
+                    splits  = extract_splits(garmin, activity_id)
+                    weather = extract_weather(garmin, activity_id)
                 db.table("activities").upsert({
                     "date":               d,
                     "name":               a.get("activityName"),
@@ -206,13 +339,13 @@ def backfill():
                     "elevation_gain_m":   float(a.get("elevationGain")) if a.get("elevationGain") else None,
                     "garmin_activity_id": str(activity_id),
                     "splits":             json.dumps(splits) if splits else None,
+                    "weather":            json.dumps(weather) if weather else None,
                 }, on_conflict="garmin_activity_id").execute()
             if activities:
                 results.append(d)
         except Exception as e:
             print(f"Failed for {d}: {e}")
         current += timedelta(days=1)
-
     return f"Backfill complete — activities imported for {len(results)} days", 200
 
 @app.route("/strava", methods=["GET", "POST"])
@@ -230,11 +363,10 @@ def strava():
         data        = request.json
         object_type = data.get("object_type")
         aspect_type = data.get("aspect_type")
-
         if object_type == "activity" and aspect_type == "create":
             event_time = data.get("event_time")
             if event_time:
-                from datetime import datetime, timezone
+                from datetime import timezone
                 activity_date = datetime.fromtimestamp(event_time, tz=timezone.utc).date()
                 d = activity_date.isoformat()
                 print(f"Strava activity uploaded for {d} — syncing Garmin...")
@@ -246,7 +378,6 @@ def strava():
                     print(f"Strava-triggered sync complete for {d}")
                 except Exception as e:
                     print(f"Strava-triggered sync failed: {e}")
-
         return "ok", 200
 
 @app.route("/telegram", methods=["POST"])
@@ -254,7 +385,7 @@ def telegram():
     db = get_supabase()
     ai = get_anthropic()
 
-    data = request.json
+    data    = request.json
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     user_msg = message.get("text", "")
@@ -278,16 +409,18 @@ def telegram():
 WELLNESS (HRV, sleep, Body Battery, resting HR):
 {json.dumps(wellness, indent=2, default=str)}
 
-ACTIVITIES completed (runs, rides, etc.) including per km splits:
+ACTIVITIES completed (runs, rides, etc.) including per km splits and weather:
 {json.dumps(activities, indent=2, default=str)}
 
-TRAINING PLAN (planned workouts from coach):
+TRAINING PLAN (planned workouts from coach) with compliance scores:
 {json.dumps(training, indent=2, default=str)}
 
 Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
 If data is missing for a day, mention it. Give practical training advice based on recovery trends.
 Always consider the planned workout for today when giving advice.
-When asked about pace or splits, reference the per km split data directly."""
+When asked about pace or splits, reference the per km split data directly.
+When asked about conditions, reference the weather data captured during the activity.
+Compliance scores are out of 100 and reflect how well the actual session matched the plan."""
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
