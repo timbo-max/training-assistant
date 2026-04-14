@@ -92,36 +92,36 @@ def extract_weather(garmin, activity_id):
 def extract_activity_details(garmin, activity_id):
     try:
         details = garmin.get_activity(activity_id)
+        summary = details.get("summaryDTO", {})
 
-        avg_speed = details.get("summaryDTO", {}).get("averageSpeed")
+        avg_speed = summary.get("averageSpeed")
         avg_pace = None
         if avg_speed and avg_speed > 0:
             pace_sec = 1000 / avg_speed
             avg_pace = round(pace_sec / 60, 2)
 
-        moving_speed = details.get("summaryDTO", {}).get("averageMovingSpeed")
-        moving_time = details.get("summaryDTO", {}).get("movingDuration")
-
-        training_effect = details.get("summaryDTO", {}).get("trainingEffect")
-        anaerobic_effect = details.get("summaryDTO", {}).get("anaerobicTrainingEffect")
-
-        stamina = details.get("summaryDTO", {}).get("startingStamina")
-        stamina_end = details.get("summaryDTO", {}).get("endingStamina")
+        execution_score = None
+        try:
+            iq = details.get("connectIQMeasurements", [])
+            if iq:
+                execution_score = float(iq[0].get("value", 0))
+        except Exception:
+            pass
 
         return {
-            "avg_pace_min_km":         avg_pace,
-            "avg_cadence":             details.get("summaryDTO", {}).get("averageRunCadence") or
-                                       details.get("summaryDTO", {}).get("averageBikingCadenceInRevPerMinute"),
-            "training_effect_aerobic": training_effect,
-            "training_effect_anaerobic": anaerobic_effect,
-            "exercise_load":           details.get("summaryDTO", {}).get("activityTrainingLoad"),
-            "body_battery_impact":     details.get("summaryDTO", {}).get("bodyBatteryChange"),
-            "execution_score":         details.get("summaryDTO", {}).get("workoutExecutionScore"),
-            "perceived_effort":        details.get("summaryDTO", {}).get("perceivedExertion"),
-            "stamina_start":           int(stamina * 100) if stamina else None,
-            "stamina_end":             int(stamina_end * 100) if stamina_end else None,
-            "moving_time_seconds":     int(moving_time) if moving_time else None,
-            "calories":                details.get("summaryDTO", {}).get("calories"),
+            "avg_pace_min_km":           avg_pace,
+            "avg_cadence":               summary.get("averageRunCadence") or
+                                         summary.get("averageBikingCadenceInRevPerMinute"),
+            "training_effect_aerobic":   summary.get("trainingEffect"),
+            "training_effect_anaerobic": summary.get("anaerobicTrainingEffect"),
+            "exercise_load":             summary.get("activityTrainingLoad"),
+            "body_battery_impact":       summary.get("differenceBodyBattery"),
+            "execution_score":           execution_score,
+            "perceived_effort":          summary.get("perceivedExertion"),
+            "stamina_start":             summary.get("beginPotentialStamina"),
+            "stamina_end":               summary.get("endPotentialStamina"),
+            "moving_time_seconds":       summary.get("movingDuration"),
+            "calories":                  summary.get("calories"),
         }
     except Exception as e:
         print(f"Activity details fetch failed for {activity_id}: {e}")
