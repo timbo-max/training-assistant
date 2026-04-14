@@ -67,18 +67,39 @@ def extract_splits(garmin, activity_id):
 def sync_day(garmin, db, d):
     try:
         sleep = garmin.get_sleep_data(d)
-        hrv   = garmin.get_hrv_data(d)
         bb    = garmin.get_body_battery(d)
-        rhr   = garmin.get_rhr_day(d)
+
+        hrv_value = None
+        try:
+            hrv_data = garmin.get_hrv_data(d)
+            hrv_value = hrv_data.get("hrvSummary", {}).get("lastNight") or \
+                        hrv_data.get("hrvSummary", {}).get("weeklyAvg")
+        except Exception:
+            pass
+
+        rhr_value = None
+        try:
+            rhr_data = garmin.get_rhr_day(d)
+            rhr_value = rhr_data.get("restingHeartRate") or \
+                        rhr_data.get("allMetrics", {}).get("metricsMap", {}).get("WELLNESS_RESTING_HEART_RATE", [{}])[0].get("value")
+        except Exception:
+            pass
+
+        if rhr_value is None:
+            try:
+                stats = garmin.get_stats(d)
+                rhr_value = stats.get("restingHeartRate")
+            except Exception:
+                pass
 
         db.table("daily_wellness").upsert({
-            "date": d,
+            "date":               d,
             "sleep_score":        sleep.get("dailySleepDTO", {}).get("sleepScores", {}).get("overall", {}).get("value"),
             "sleep_hours":        round((sleep.get("dailySleepDTO", {}).get("sleepTimeSeconds", 0) or 0) / 3600, 2),
-            "hrv_rmssd":          hrv.get("hrvSummary", {}).get("lastNight"),
+            "hrv_rmssd":          hrv_value,
             "body_battery_start": bb[0].get("charged") if bb else None,
             "body_battery_end":   bb[-1].get("drained") if bb else None,
-            "resting_hr":         rhr.get("restingHeartRate"),
+            "resting_hr":         rhr_value,
         }, on_conflict="date").execute()
     except Exception as e:
         print(f"Wellness sync failed for {d}: {e}")
@@ -193,6 +214,40 @@ def backfill():
         current += timedelta(days=1)
 
     return f"Backfill complete — activities imported for {len(results)} days", 200
+
+@app.route("/strava", methods=["GET", "POST"])
+def strava():
+    if request.method == "GET":
+        verify_token = os.environ["STRAVA_VERIFY_TOKEN"]
+        mode      = request.args.get("hub.mode")
+        token     = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if mode == "subscribe" and token == verify_token:
+            return json.dumps({"hub.challenge": challenge}), 200
+        return "Forbidden", 403
+
+    if request.method == "POST":
+        data        = request.json
+        object_type = data.get("object_type")
+        aspect_type = data.get("aspect_type")
+
+        if object_type == "activity" and aspect_type == "create":
+            event_time = data.get("event_time")
+            if event_time:
+                from datetime import datetime, timezone
+                activity_date = datetime.fromtimestamp(event_time, tz=timezone.utc).date()
+                d = activity_date.isoformat()
+                print(f"Strava activity uploaded for {d} — syncing Garmin...")
+                try:
+                    db     = get_supabase()
+                    garmin = get_garmin()
+                    sync_day(garmin, db, d)
+                    sync_trainingpeaks()
+                    print(f"Strava-triggered sync complete for {d}")
+                except Exception as e:
+                    print(f"Strava-triggered sync failed: {e}")
+
+        return "ok", 200
 
 @app.route("/telegram", methods=["POST"])
 def telegram():
