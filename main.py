@@ -89,27 +89,92 @@ def extract_weather(garmin, activity_id):
         print(f"Weather fetch failed for activity {activity_id}: {e}")
         return None
 
+def extract_activity_details(garmin, activity_id):
+    try:
+        details = garmin.get_activity(activity_id)
+
+        avg_speed = details.get("summaryDTO", {}).get("averageSpeed")
+        avg_pace = None
+        if avg_speed and avg_speed > 0:
+            pace_sec = 1000 / avg_speed
+            avg_pace = round(pace_sec / 60, 2)
+
+        moving_speed = details.get("summaryDTO", {}).get("averageMovingSpeed")
+        moving_time = details.get("summaryDTO", {}).get("movingDuration")
+
+        training_effect = details.get("summaryDTO", {}).get("trainingEffect")
+        anaerobic_effect = details.get("summaryDTO", {}).get("anaerobicTrainingEffect")
+
+        stamina = details.get("summaryDTO", {}).get("startingStamina")
+        stamina_end = details.get("summaryDTO", {}).get("endingStamina")
+
+        return {
+            "avg_pace_min_km":         avg_pace,
+            "avg_cadence":             details.get("summaryDTO", {}).get("averageRunCadence") or
+                                       details.get("summaryDTO", {}).get("averageBikingCadenceInRevPerMinute"),
+            "training_effect_aerobic": training_effect,
+            "training_effect_anaerobic": anaerobic_effect,
+            "exercise_load":           details.get("summaryDTO", {}).get("activityTrainingLoad"),
+            "body_battery_impact":     details.get("summaryDTO", {}).get("bodyBatteryChange"),
+            "execution_score":         details.get("summaryDTO", {}).get("workoutExecutionScore"),
+            "perceived_effort":        details.get("summaryDTO", {}).get("perceivedExertion"),
+            "stamina_start":           int(stamina * 100) if stamina else None,
+            "stamina_end":             int(stamina_end * 100) if stamina_end else None,
+            "moving_time_seconds":     int(moving_time) if moving_time else None,
+            "calories":                details.get("summaryDTO", {}).get("calories"),
+        }
+    except Exception as e:
+        print(f"Activity details fetch failed for {activity_id}: {e}")
+        return {}
+
 def score_compliance(planned, actual_activities):
     if not planned or not actual_activities:
         return None, None
     ai = get_anthropic()
     actual_summary = json.dumps([{
-        "name":             a.get("name"),
-        "sport_type":       a.get("sport_type"),
-        "duration_seconds": a.get("duration_seconds"),
-        "distance_km":      a.get("distance_km"),
+        "name":                      a.get("name"),
+        "sport_type":                a.get("sport_type"),
+        "duration_seconds":          a.get("duration_seconds"),
+        "moving_time_seconds":       a.get("moving_time_seconds"),
+        "distance_km":               a.get("distance_km"),
+        "avg_hr":                    a.get("avg_hr"),
+        "max_hr":                    a.get("max_hr"),
+        "avg_pace_min_km":           a.get("avg_pace_min_km"),
+        "avg_cadence":               a.get("avg_cadence"),
+        "training_effect_aerobic":   a.get("training_effect_aerobic"),
+        "training_effect_anaerobic": a.get("training_effect_anaerobic"),
+        "exercise_load":             a.get("exercise_load"),
+        "execution_score":           a.get("execution_score"),
+        "perceived_effort":          a.get("perceived_effort"),
+        "stamina_start":             a.get("stamina_start"),
+        "stamina_end":               a.get("stamina_end"),
+        "splits":                    a.get("splits"),
     } for a in actual_activities], default=str)
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=200,
-        messages=[{"role": "user", "content": f"""Compare the planned workout to the actual activities completed.
-Planned: {planned}
-Actual: {actual_summary}
-Return ONLY a JSON object with two fields:
-- score: integer 0-100 (100 = perfect compliance)
-- notes: one sentence explaining the score
-Example: {{"score": 85, "notes": "Distance slightly short but effort and structure matched well."}}
+        max_tokens=300,
+        messages=[{"role": "user", "content": f"""You are a running coach analysing workout compliance.
+
+PLANNED WORKOUT:
+{planned}
+
+ACTUAL WORKOUT DATA:
+{actual_summary}
+
+Compare the planned vs actual workout. Consider:
+- Total duration and distance vs planned
+- Pace achieved vs target pace zones
+- Whether interval structure was completed
+- Heart rate data as evidence of effort zones
+- Training effect as evidence of intensity achieved
+- Execution score from Garmin if available (0-100)
+- Perceived effort and stamina data
+
+Return ONLY a JSON object:
+{{"score": <integer 0-100>, "notes": "<two sentences: what matched and what didn't>"}}
+
+100 = perfect compliance, 0 = completely missed session.
 Return only the JSON, nothing else."""}]
     )
     try:
@@ -193,35 +258,50 @@ def sync_day(garmin, db, d):
 
             splits  = None
             weather = None
+            details = {}
             if sport_type in ["running", "trail_running", "cycling", "road_biking"]:
                 splits  = extract_splits(garmin, activity_id)
                 weather = extract_weather(garmin, activity_id)
+                details = extract_activity_details(garmin, activity_id)
 
             db.table("activities").upsert({
-                "date":               d,
-                "name":               a.get("activityName"),
-                "sport_type":         sport_type,
-                "duration_seconds":   int(a.get("duration", 0) or 0),
-                "distance_km":        round((a.get("distance") or 0) / 1000, 2),
-                "avg_hr":             int(a.get("averageHR")) if a.get("averageHR") else None,
-                "max_hr":             int(a.get("maxHR")) if a.get("maxHR") else None,
-                "elevation_gain_m":   float(a.get("elevationGain")) if a.get("elevationGain") else None,
-                "garmin_activity_id": str(activity_id),
-                "splits":             json.dumps(splits) if splits else None,
-                "weather":            json.dumps(weather) if weather else None,
+                "date":                      d,
+                "name":                      a.get("activityName"),
+                "sport_type":                sport_type,
+                "duration_seconds":          int(a.get("duration", 0) or 0),
+                "distance_km":               round((a.get("distance") or 0) / 1000, 2),
+                "avg_hr":                    int(a.get("averageHR")) if a.get("averageHR") else None,
+                "max_hr":                    int(a.get("maxHR")) if a.get("maxHR") else None,
+                "elevation_gain_m":          float(a.get("elevationGain")) if a.get("elevationGain") else None,
+                "garmin_activity_id":        str(activity_id),
+                "splits":                    json.dumps(splits) if splits else None,
+                "weather":                   json.dumps(weather) if weather else None,
+                "avg_pace_min_km":           details.get("avg_pace_min_km"),
+                "avg_cadence":               details.get("avg_cadence"),
+                "training_effect_aerobic":   details.get("training_effect_aerobic"),
+                "training_effect_anaerobic": details.get("training_effect_anaerobic"),
+                "exercise_load":             details.get("exercise_load"),
+                "body_battery_impact":       details.get("body_battery_impact"),
+                "execution_score":           details.get("execution_score"),
+                "perceived_effort":          details.get("perceived_effort"),
+                "stamina_start":             details.get("stamina_start"),
+                "stamina_end":               details.get("stamina_end"),
+                "moving_time_seconds":       details.get("moving_time_seconds"),
+                "calories":                  details.get("calories"),
             }, on_conflict="garmin_activity_id").execute()
 
         if planned and activities:
-            score, notes = score_compliance(planned, activities)
+            saved = db.table("activities").select("*").eq("date", d).execute().data
+            score, notes = score_compliance(planned, saved)
             if score is not None:
                 db.table("training_load").update({
                     "workout_completed": True,
                 }).eq("date", d).execute()
-                for a in activities:
+                for a in saved:
                     db.table("activities").update({
                         "compliance_score": score,
                         "compliance_notes": notes,
-                    }).eq("garmin_activity_id", str(a.get("activityId"))).execute()
+                    }).eq("garmin_activity_id", str(a.get("garmin_activity_id"))).execute()
                 print(f"Compliance score for {d}: {score}/100 — {notes}")
 
     except Exception as e:
@@ -312,7 +392,7 @@ Structure it as:
 1. Week overview (2 sentences)
 2. Training load (sessions completed, total distance, total time)
 3. Recovery trends (HRV, sleep, Body Battery patterns)
-4. Compliance (how well planned vs actual matched)
+4. Compliance (how well planned vs actual matched, reference execution scores)
 5. One key insight or recommendation for next week
 
 WELLNESS DATA:
@@ -352,21 +432,35 @@ def backfill():
                 sport_type  = a.get("activityType", {}).get("typeKey", "")
                 splits  = None
                 weather = None
+                details = {}
                 if sport_type in ["running", "trail_running", "cycling", "road_biking"]:
                     splits  = extract_splits(garmin, activity_id)
                     weather = extract_weather(garmin, activity_id)
+                    details = extract_activity_details(garmin, activity_id)
                 db.table("activities").upsert({
-                    "date":               d,
-                    "name":               a.get("activityName"),
-                    "sport_type":         sport_type,
-                    "duration_seconds":   int(a.get("duration", 0) or 0),
-                    "distance_km":        round((a.get("distance") or 0) / 1000, 2),
-                    "avg_hr":             int(a.get("averageHR")) if a.get("averageHR") else None,
-                    "max_hr":             int(a.get("maxHR")) if a.get("maxHR") else None,
-                    "elevation_gain_m":   float(a.get("elevationGain")) if a.get("elevationGain") else None,
-                    "garmin_activity_id": str(activity_id),
-                    "splits":             json.dumps(splits) if splits else None,
-                    "weather":            json.dumps(weather) if weather else None,
+                    "date":                      d,
+                    "name":                      a.get("activityName"),
+                    "sport_type":                sport_type,
+                    "duration_seconds":          int(a.get("duration", 0) or 0),
+                    "distance_km":               round((a.get("distance") or 0) / 1000, 2),
+                    "avg_hr":                    int(a.get("averageHR")) if a.get("averageHR") else None,
+                    "max_hr":                    int(a.get("maxHR")) if a.get("maxHR") else None,
+                    "elevation_gain_m":          float(a.get("elevationGain")) if a.get("elevationGain") else None,
+                    "garmin_activity_id":        str(activity_id),
+                    "splits":                    json.dumps(splits) if splits else None,
+                    "weather":                   json.dumps(weather) if weather else None,
+                    "avg_pace_min_km":           details.get("avg_pace_min_km"),
+                    "avg_cadence":               details.get("avg_cadence"),
+                    "training_effect_aerobic":   details.get("training_effect_aerobic"),
+                    "training_effect_anaerobic": details.get("training_effect_anaerobic"),
+                    "exercise_load":             details.get("exercise_load"),
+                    "body_battery_impact":       details.get("body_battery_impact"),
+                    "execution_score":           details.get("execution_score"),
+                    "perceived_effort":          details.get("perceived_effort"),
+                    "stamina_start":             details.get("stamina_start"),
+                    "stamina_end":               details.get("stamina_end"),
+                    "moving_time_seconds":       details.get("moving_time_seconds"),
+                    "calories":                  details.get("calories"),
                 }, on_conflict="garmin_activity_id").execute()
             if activities:
                 results.append(d)
@@ -436,10 +530,10 @@ def telegram():
 WELLNESS (HRV, sleep, Body Battery, resting HR):
 {json.dumps(wellness, indent=2, default=str)}
 
-ACTIVITIES completed (runs, rides, etc.) including per km splits and weather:
+ACTIVITIES completed including splits, weather, training effect, execution score, cadence, stamina and compliance:
 {json.dumps(activities, indent=2, default=str)}
 
-TRAINING PLAN (planned workouts from coach) with compliance scores:
+TRAINING PLAN (planned workouts from coach):
 {json.dumps(training, indent=2, default=str)}
 
 Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
@@ -447,7 +541,9 @@ If data is missing for a day, mention it. Give practical training advice based o
 Always consider the planned workout for today when giving advice.
 When asked about pace or splits, reference the per km split data directly.
 When asked about conditions, reference the weather data captured during the activity.
-Compliance scores are out of 100 and reflect how well the actual session matched the plan."""
+Execution score is Garmin's own compliance metric out of 100.
+Training effect aerobic scale: 0-5 where 5 is highly impacting.
+Stamina is percentage remaining at start and end of activity."""
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
