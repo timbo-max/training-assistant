@@ -676,12 +676,18 @@ Stamina is percentage remaining at start and end of activity."""
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=800,
         messages=[{"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"}]
     )
 
     reply = response.content[0].text
-    send_telegram(chat_id, reply)
+
+    if len(reply) <= 4000:
+        send_telegram(chat_id, reply)
+    else:
+        chunks = [reply[i:i+4000] for i in range(0, len(reply), 4000)]
+        for chunk in chunks:
+            send_telegram(chat_id, chunk)
     return "ok", 200
 
 @app.route("/", methods=["GET"])
