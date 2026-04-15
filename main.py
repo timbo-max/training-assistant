@@ -664,6 +664,13 @@ GYM EXERCISES (sets, reps, weights, volume per exercise):
 {json.dumps(gym_exercises, indent=2, default=str)}
 
 Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
+IMPORTANT FORMATTING RULES — you are responding in Telegram which does not render markdown tables or headers:
+- Never use tables under any circumstances
+- Never use markdown headers (##, ###)
+- Never use bold (**text**)
+- Use simple numbered or dash lists instead
+- Keep formatting plain and conversational
+- For gym sessions use this format: "P1: Broad Jump — 3x5, P2: Pogo Jumps — 3x8" etc.
 If data is missing for a day, mention it. Give practical training advice based on recovery trends.
 Always consider the planned workout for today when giving advice.
 When asked about pace or splits, reference the per km split data directly.
