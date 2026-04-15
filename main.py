@@ -235,7 +235,7 @@ def sync_hevy(db, target_date=None):
             if target_date and workout_date != target_date:
                 continue
 
-            hevy_id = workout.get("id")
+            hevy_id  = workout.get("id")
             end_time = workout.get("end_time")
 
             duration = None
@@ -254,7 +254,7 @@ def sync_hevy(db, target_date=None):
             }, on_conflict="hevy_workout_id").execute()
 
             session_row = db.table("gym_sessions").select("id").eq("hevy_workout_id", hevy_id).execute().data
-            session_id = session_row[0]["id"] if session_row else None
+            session_id  = session_row[0]["id"] if session_row else None
 
             for exercise in workout.get("exercises", []):
                 sets = exercise.get("sets", [])
@@ -263,15 +263,9 @@ def sync_hevy(db, target_date=None):
                     (s.get("weight_kg") or 0) * (s.get("reps") or 0)
                     for s in sets
                 )
-                max_weight = max(
-                    (s.get("weight_kg") or 0) for s in sets
-                ) if sets else None
-                total_reps = sum(
-                    (s.get("reps") or 0) for s in sets
-                )
-                total_duration = sum(
-                    (s.get("duration_seconds") or 0) for s in sets
-                )
+                max_weight  = max((s.get("weight_kg") or 0) for s in sets) if sets else None
+                total_reps  = sum((s.get("reps") or 0) for s in sets)
+                total_dur   = sum((s.get("duration_seconds") or 0) for s in sets)
 
                 db.table("gym_exercises").upsert({
                     "gym_session_id":         session_id,
@@ -285,7 +279,7 @@ def sync_hevy(db, target_date=None):
                     "total_volume_kg":        round(total_volume, 2) if total_volume else None,
                     "max_weight_kg":          max_weight,
                     "total_reps":             total_reps if total_reps > 0 else None,
-                    "total_duration_seconds": total_duration if total_duration > 0 else None,
+                    "total_duration_seconds": total_dur if total_dur > 0 else None,
                 }, on_conflict="gym_session_id,exercise_index").execute()
 
             print(f"Hevy sync complete for workout {hevy_id} on {workout_date}")
@@ -301,7 +295,7 @@ def sync_day(garmin, db, d):
 
         hrv_value = None
         try:
-            hrv_data = garmin.get_hrv_data(d)
+            hrv_data  = garmin.get_hrv_data(d)
             hrv_value = hrv_data.get("hrvSummary", {}).get("lastNight") or \
                         hrv_data.get("hrvSummary", {}).get("weeklyAvg")
         except Exception:
@@ -309,7 +303,7 @@ def sync_day(garmin, db, d):
 
         rhr_value = None
         try:
-            rhr_data = garmin.get_rhr_day(d)
+            rhr_data  = garmin.get_rhr_day(d)
             rhr_value = rhr_data.get("restingHeartRate") or \
                         rhr_data.get("allMetrics", {}).get("metricsMap", {}).get("WELLNESS_RESTING_HEART_RATE", [{}])[0].get("value")
         except Exception:
@@ -317,7 +311,7 @@ def sync_day(garmin, db, d):
 
         if rhr_value is None:
             try:
-                stats = garmin.get_stats(d)
+                stats     = garmin.get_stats(d)
                 rhr_value = stats.get("restingHeartRate")
             except Exception:
                 pass
@@ -338,10 +332,9 @@ def sync_day(garmin, db, d):
         print(f"Wellness sync failed for {d}: {e}")
 
     try:
-        activities = garmin.get_activities_by_date(d, d)
-
+        activities  = garmin.get_activities_by_date(d, d)
         planned_row = db.table("training_load").select("planned_workout").eq("date", d).execute().data
-        planned = planned_row[0].get("planned_workout") if planned_row else None
+        planned     = planned_row[0].get("planned_workout") if planned_row else None
 
         for a in activities:
             activity_id = a.get("activityId")
@@ -405,18 +398,18 @@ def sync_day(garmin, db, d):
             print(f"HRV alert check failed: {e}")
 
 def sync_garmin():
-    db = get_supabase()
+    db     = get_supabase()
     garmin = get_garmin()
     yesterday = date.today() - timedelta(days=1)
     sync_day(garmin, db, yesterday.isoformat())
     print(f"Garmin sync complete for {yesterday.isoformat()}")
 
 def sync_trainingpeaks():
-    db = get_supabase()
+    db       = get_supabase()
     ical_url = os.environ["TRAININGPEAKS_ICAL_URL"]
     response = requests.get(ical_url)
-    cal = Calendar.from_ical(response.content)
-    today = date.today()
+    cal      = Calendar.from_ical(response.content)
+    today    = date.today()
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
     for component in cal.walk():
@@ -514,10 +507,10 @@ Keep it under 250 words. Use plain text, no markdown."""}]
 def backfill():
     if not check_sync_auth():
         return "Unauthorised", 401
-    db = get_supabase()
+    db     = get_supabase()
     garmin = get_garmin()
-    today = date.today()
-    start = today - timedelta(days=90)
+    today  = date.today()
+    start  = today - timedelta(days=90)
     current = start
     results = []
     while current < today:
@@ -574,7 +567,7 @@ def debug_activity():
     activity_id = request.args.get("id")
     if not activity_id:
         return "Please provide ?id=your_garmin_activity_id", 400
-    garmin = get_garmin()
+    garmin  = get_garmin()
     details = garmin.get_activity(int(activity_id))
     return json.dumps(details, indent=2, default=str), 200
 
@@ -582,59 +575,12 @@ def debug_activity():
 def debug_hevy():
     if not check_sync_auth():
         return "Unauthorised", 401
-    headers = {"api-key": os.environ["HEVY_API_KEY"]}
+    headers  = {"api-key": os.environ["HEVY_API_KEY"]}
     response = requests.get(
         "https://api.hevyapp.com/v1/workouts?page=1&pageSize=5",
         headers=headers
     )
     return json.dumps(response.json(), indent=2, default=str), 200
-
-@app.route("/debug-weather", methods=["GET"])
-def debug_weather():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    activity_id = request.args.get("id")
-    if not activity_id:
-        return "Please provide ?id=your_garmin_activity_id", 400
-    garmin = get_garmin()
-    try:
-        weather = garmin.get_activity_weather(int(activity_id))
-        return json.dumps(weather, indent=2, default=str), 200
-    except Exception as e:
-        return f"Error: {e}", 200
-
-@app.route("/strava", methods=["GET", "POST"])
-def strava():
-    if request.method == "GET":
-        verify_token = os.environ["STRAVA_VERIFY_TOKEN"]
-        mode      = request.args.get("hub.mode")
-        token     = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
-        if mode == "subscribe" and token == verify_token:
-            return json.dumps({"hub.challenge": challenge}), 200
-        return "Forbidden", 403
-
-    if request.method == "POST":
-        data        = request.json
-        object_type = data.get("object_type")
-        aspect_type = data.get("aspect_type")
-        if object_type == "activity" and aspect_type == "create":
-            event_time = data.get("event_time")
-            if event_time:
-                from datetime import timezone
-                activity_date = datetime.fromtimestamp(event_time, tz=timezone.utc).date()
-                d = activity_date.isoformat()
-                print(f"Strava activity uploaded for {d} — syncing Garmin...")
-                try:
-                    db     = get_supabase()
-                    garmin = get_garmin()
-                    sync_day(garmin, db, d)
-                    sync_trainingpeaks()
-                    sync_hevy(db, target_date=activity_date)
-                    print(f"Strava-triggered sync complete for {d}")
-                except Exception as e:
-                    print(f"Strava-triggered sync failed: {e}")
-        return "ok", 200
 
 @app.route("/telegram", methods=["POST"])
 def telegram():
