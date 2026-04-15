@@ -202,6 +202,83 @@ def check_hrv_alert(db, today_hrv):
         send_telegram_to_me(msg)
         print(f"HRV alert sent: {msg}")
 
+def sync_hevy(db, target_date=None):
+    try:
+        headers = {"api-key": os.environ["HEVY_API_KEY"]}
+        response = requests.get(
+            "https://api.hevyapp.com/v1/workouts?page=1&pageSize=10",
+            headers=headers
+        )
+        workouts = response.json().get("workouts", [])
+
+        for workout in workouts:
+            start_time = workout.get("start_time", "")
+            if not start_time:
+                continue
+
+            workout_date = datetime.fromisoformat(start_time.replace("Z", "+00:00")).date()
+
+            if target_date and workout_date != target_date:
+                continue
+
+            hevy_id = workout.get("id")
+            end_time = workout.get("end_time")
+
+            duration = None
+            if start_time and end_time:
+                start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                end_dt   = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                duration = int((end_dt - start_dt).total_seconds())
+
+            db.table("gym_sessions").upsert({
+                "hevy_workout_id":  hevy_id,
+                "date":             workout_date.isoformat(),
+                "title":            workout.get("title"),
+                "start_time":       start_time,
+                "end_time":         end_time,
+                "duration_seconds": duration,
+            }, on_conflict="hevy_workout_id").execute()
+
+            session_row = db.table("gym_sessions").select("id").eq("hevy_workout_id", hevy_id).execute().data
+            session_id = session_row[0]["id"] if session_row else None
+
+            for exercise in workout.get("exercises", []):
+                sets = exercise.get("sets", [])
+
+                total_volume = sum(
+                    (s.get("weight_kg") or 0) * (s.get("reps") or 0)
+                    for s in sets
+                )
+                max_weight = max(
+                    (s.get("weight_kg") or 0) for s in sets
+                ) if sets else None
+                total_reps = sum(
+                    (s.get("reps") or 0) for s in sets
+                )
+                total_duration = sum(
+                    (s.get("duration_seconds") or 0) for s in sets
+                )
+
+                db.table("gym_exercises").upsert({
+                    "gym_session_id":        session_id,
+                    "hevy_workout_id":       hevy_id,
+                    "date":                  workout_date.isoformat(),
+                    "exercise_index":        exercise.get("index"),
+                    "exercise_name":         exercise.get("title"),
+                    "exercise_template_id":  exercise.get("exercise_template_id"),
+                    "superset_id":           exercise.get("superset_id"),
+                    "sets":                  json.dumps(sets),
+                    "total_volume_kg":       round(total_volume, 2) if total_volume else None,
+                    "max_weight_kg":         max_weight,
+                    "total_reps":            total_reps if total_reps > 0 else None,
+                    "total_duration_seconds": total_duration if total_duration > 0 else None,
+                }, on_conflict="gym_session_id,exercise_index").execute()
+
+            print(f"Hevy sync complete for workout {hevy_id} on {workout_date}")
+
+    except Exception as e:
+        print(f"Hevy sync failed: {e}")
+
 def sync_day(garmin, db, d):
     today_hrv = None
     try:
@@ -353,6 +430,8 @@ def trigger_sync():
         return "Unauthorised", 401
     sync_garmin()
     sync_trainingpeaks()
+    db = get_supabase()
+    sync_hevy(db)
     return "Sync done", 200
 
 @app.route("/sync-date", methods=["GET"])
@@ -363,13 +442,14 @@ def sync_specific_date():
     if not d:
         return "Please provide a date parameter e.g. ?date=2026-04-13", 400
     try:
-        datetime.strptime(d, "%Y-%m-%d")
+        target = datetime.strptime(d, "%Y-%m-%d").date()
     except ValueError:
         return "Invalid date format. Use YYYY-MM-DD e.g. ?date=2026-04-13", 400
     db     = get_supabase()
     garmin = get_garmin()
     sync_day(garmin, db, d)
     sync_trainingpeaks()
+    sync_hevy(db, target_date=target)
     return f"Sync done for {d}", 200
 
 @app.route("/weekly-summary", methods=["GET"])
@@ -383,6 +463,7 @@ def weekly_summary():
     wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date").execute().data
     activities = db.table("activities").select("*").gte("date", week_ago).order("date").execute().data
     training   = db.table("training_load").select("*").gte("date", week_ago).order("date").execute().data
+    gym        = db.table("gym_sessions").select("*").gte("date", week_ago).order("date").execute().data
 
     response = ai.messages.create(
         model="claude-sonnet-4-6",
@@ -390,7 +471,7 @@ def weekly_summary():
         messages=[{"role": "user", "content": f"""Write a concise weekly training summary for an athlete. Use the actual numbers.
 Structure it as:
 1. Week overview (2 sentences)
-2. Training load (sessions completed, total distance, total time)
+2. Training load (sessions completed, total distance, total time, gym sessions)
 3. Recovery trends (HRV, sleep, Body Battery patterns)
 4. Compliance (how well planned vs actual matched, reference execution scores)
 5. One key insight or recommendation for next week
@@ -403,6 +484,9 @@ ACTIVITIES:
 
 TRAINING PLAN:
 {json.dumps(training, indent=2, default=str)}
+
+GYM SESSIONS:
+{json.dumps(gym, indent=2, default=str)}
 
 Keep it under 250 words. Use plain text, no markdown."""}]
     )
@@ -469,6 +553,17 @@ def backfill():
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
 
+@app.route("/debug-activity", methods=["GET"])
+def debug_activity():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    activity_id = request.args.get("id")
+    if not activity_id:
+        return "Please provide ?id=your_garmin_activity_id", 400
+    garmin = get_garmin()
+    details = garmin.get_activity(int(activity_id))
+    return json.dumps(details, indent=2, default=str), 200
+
 @app.route("/debug-hevy", methods=["GET"])
 def debug_hevy():
     if not check_sync_auth():
@@ -480,17 +575,6 @@ def debug_hevy():
     )
     return json.dumps(response.json(), indent=2, default=str), 200
 
-@app.route("/debug-activity", methods=["GET"])
-def debug_activity():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    activity_id = request.args.get("id")
-    if not activity_id:
-        return "Please provide ?id=your_garmin_activity_id", 400
-    garmin = get_garmin()
-    details = garmin.get_activity(int(activity_id))
-    return json.dumps(details, indent=2, default=str), 200
-    
 @app.route("/strava", methods=["GET", "POST"])
 def strava():
     if request.method == "GET":
@@ -518,6 +602,7 @@ def strava():
                     garmin = get_garmin()
                     sync_day(garmin, db, d)
                     sync_trainingpeaks()
+                    sync_hevy(db, target_date=activity_date)
                     print(f"Strava-triggered sync complete for {d}")
                 except Exception as e:
                     print(f"Strava-triggered sync failed: {e}")
@@ -546,22 +631,31 @@ def telegram():
     wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     activities = db.table("activities").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     training   = db.table("training_load").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    gym_sessions = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
     context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
 
 WELLNESS (HRV, sleep, Body Battery, resting HR):
 {json.dumps(wellness, indent=2, default=str)}
 
-ACTIVITIES completed including splits, weather, training effect, execution score, cadence, stamina and compliance:
+CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score:
 {json.dumps(activities, indent=2, default=str)}
 
 TRAINING PLAN (planned workouts from coach):
 {json.dumps(training, indent=2, default=str)}
 
+GYM SESSIONS:
+{json.dumps(gym_sessions, indent=2, default=str)}
+
+GYM EXERCISES (sets, reps, weights, volume per exercise):
+{json.dumps(gym_exercises, indent=2, default=str)}
+
 Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
 If data is missing for a day, mention it. Give practical training advice based on recovery trends.
 Always consider the planned workout for today when giving advice.
 When asked about pace or splits, reference the per km split data directly.
+When asked about gym progress, reference weights, volume and reps trends across sessions.
 When asked about conditions, reference the weather data captured during the activity.
 Execution score is Garmin's own compliance metric out of 100.
 Training effect aerobic scale: 0-5 where 5 is highly impacting.
