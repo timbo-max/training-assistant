@@ -601,6 +601,44 @@ def telegram():
         send_telegram(chat_id, "Sorry, you are not authorised to use this bot.")
         return "ok", 200
 
+    # --- Sync commands ---
+    if user_msg.lower() in ["/sync", "/sync today"]:
+        try:
+            garmin = get_garmin()
+            today  = date.today().isoformat()
+            sync_day(garmin, db, today)
+            sync_trainingpeaks()
+            sync_hevy(db, target_date=date.today())
+            send_telegram(chat_id, f"Sync complete for {today}!")
+        except Exception as e:
+            send_telegram(chat_id, f"Sync failed: {e}")
+        return "ok", 200
+
+    if user_msg.lower().startswith("/sync "):
+        try:
+            d      = user_msg.split(" ")[1]
+            target = datetime.strptime(d, "%Y-%m-%d").date()
+            garmin = get_garmin()
+            sync_day(garmin, db, d)
+            sync_trainingpeaks()
+            sync_hevy(db, target_date=target)
+            send_telegram(chat_id, f"Sync complete for {d}!")
+        except Exception as e:
+            send_telegram(chat_id, f"Sync failed: {e}")
+        return "ok", 200
+
+    if user_msg.lower() == "/help":
+        help_text = (
+            "Available commands:\n\n"
+            "/sync — sync today's data\n"
+            "/sync YYYY-MM-DD — sync a specific date e.g. /sync 2026-04-15\n"
+            "/help — show this message\n\n"
+            "Or just ask me anything about your training!"
+        )
+        send_telegram(chat_id, help_text)
+        return "ok", 200
+
+    # --- Normal chat ---
     week_ago      = (date.today() - timedelta(days=7)).isoformat()
     wellness      = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     activities    = db.table("activities").select("*").gte("date", week_ago).order("date", desc=True).execute().data
