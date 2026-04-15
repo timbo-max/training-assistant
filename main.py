@@ -13,6 +13,7 @@ app = Flask(__name__)
 _supabase = None
 _anthropic = None
 _garmin = None
+_conversation_history = []
 
 def get_supabase():
     global _supabase
@@ -584,6 +585,7 @@ def debug_hevy():
 
 @app.route("/telegram", methods=["POST"])
 def telegram():
+    global _conversation_history
     db = get_supabase()
     ai = get_anthropic()
 
@@ -601,7 +603,12 @@ def telegram():
         send_telegram(chat_id, "Sorry, you are not authorised to use this bot.")
         return "ok", 200
 
-    # --- Sync commands ---
+    # --- Commands ---
+    if user_msg.lower() == "/clear":
+        _conversation_history = []
+        send_telegram(chat_id, "Conversation history cleared!")
+        return "ok", 200
+
     if user_msg.lower() in ["/sync", "/sync today"]:
         try:
             garmin = get_garmin()
@@ -632,6 +639,7 @@ def telegram():
             "Available commands:\n\n"
             "/sync — sync today's data\n"
             "/sync YYYY-MM-DD — sync a specific date e.g. /sync 2026-04-15\n"
+            "/clear — clear conversation history\n"
             "/help — show this message\n\n"
             "Or just ask me anything about your training!"
         )
@@ -681,13 +689,19 @@ directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.
 Training effect aerobic scale: 0-5 where 5 is highly impacting.
 Stamina is percentage remaining at start and end of activity."""
 
+    _conversation_history.append({"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"})
+
+    if len(_conversation_history) > 10:
+        _conversation_history = _conversation_history[-10:]
+
     response = ai.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
-        messages=[{"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"}]
+        messages=_conversation_history
     )
 
     reply = response.content[0].text
+    _conversation_history.append({"role": "assistant", "content": reply})
 
     if len(reply) <= 4000:
         send_telegram(chat_id, reply)
