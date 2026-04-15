@@ -293,6 +293,7 @@ def sync_day(garmin, db, d):
     try:
         sleep = garmin.get_sleep_data(d)
         bb    = garmin.get_body_battery(d)
+        stats = garmin.get_stats(d)
 
         hrv_value = None
         try:
@@ -302,29 +303,71 @@ def sync_day(garmin, db, d):
         except Exception:
             pass
 
-        rhr_value = None
-        try:
-            rhr_data  = garmin.get_rhr_day(d)
-            rhr_value = rhr_data.get("restingHeartRate") or \
-                        rhr_data.get("allMetrics", {}).get("metricsMap", {}).get("WELLNESS_RESTING_HEART_RATE", [{}])[0].get("value")
-        except Exception:
-            pass
-
+        rhr_value = stats.get("restingHeartRate")
         if rhr_value is None:
             try:
-                stats     = garmin.get_stats(d)
-                rhr_value = stats.get("restingHeartRate")
+                rhr_data  = garmin.get_rhr_day(d)
+                rhr_value = rhr_data.get("restingHeartRate") or \
+                            rhr_data.get("allMetrics", {}).get("metricsMap", {}).get("WELLNESS_RESTING_HEART_RATE", [{}])[0].get("value")
             except Exception:
                 pass
 
+        # Sleep stages
+        sleep_dto   = sleep.get("dailySleepDTO", {})
+        deep_hours  = None
+        rem_hours   = None
+        light_hours = None
+        awake_hours = None
+        try:
+            deep_seconds  = sleep_dto.get("deepSleepSeconds") or 0
+            rem_seconds   = sleep_dto.get("remSleepSeconds") or 0
+            light_seconds = sleep_dto.get("lightSleepSeconds") or 0
+            awake_seconds = sleep_dto.get("awakeSleepSeconds") or 0
+            deep_hours    = round(deep_seconds / 3600, 2) if deep_seconds else None
+            rem_hours     = round(rem_seconds / 3600, 2) if rem_seconds else None
+            light_hours   = round(light_seconds / 3600, 2) if light_seconds else None
+            awake_hours   = round(awake_seconds / 3600, 2) if awake_seconds else None
+        except Exception:
+            pass
+
+        # Training readiness — use most recent entry
+        readiness_score = None
+        readiness_level = None
+        acute_load      = None
+        recovery_time   = None
+        try:
+            readiness = garmin.get_training_readiness(d)
+            if readiness:
+                latest = readiness[0]
+                readiness_score = latest.get("score")
+                readiness_level = latest.get("level")
+                acute_load      = latest.get("acuteLoad")
+                recovery_time   = latest.get("recoveryTime")
+        except Exception:
+            pass
+
         db.table("daily_wellness").upsert({
-            "date":               d,
-            "sleep_score":        sleep.get("dailySleepDTO", {}).get("sleepScores", {}).get("overall", {}).get("value"),
-            "sleep_hours":        round((sleep.get("dailySleepDTO", {}).get("sleepTimeSeconds", 0) or 0) / 3600, 2),
-            "hrv_rmssd":          hrv_value,
-            "body_battery_start": bb[0].get("charged") if bb else None,
-            "body_battery_end":   bb[-1].get("drained") if bb else None,
-            "resting_hr":         rhr_value,
+            "date":                       d,
+            "sleep_score":                sleep_dto.get("sleepScores", {}).get("overall", {}).get("value"),
+            "sleep_hours":                round((sleep_dto.get("sleepTimeSeconds", 0) or 0) / 3600, 2),
+            "sleep_deep_hours":           deep_hours,
+            "sleep_rem_hours":            rem_hours,
+            "sleep_light_hours":          light_hours,
+            "sleep_awake_hours":          awake_hours,
+            "hrv_rmssd":                  hrv_value,
+            "body_battery_start":         bb[0].get("charged") if bb else None,
+            "body_battery_end":           bb[-1].get("drained") if bb else None,
+            "resting_hr":                 rhr_value,
+            "stress_score":               stats.get("averageStressLevel"),
+            "steps":                      stats.get("totalSteps"),
+            "intensity_minutes_moderate": stats.get("moderateIntensityMinutes"),
+            "intensity_minutes_vigorous": stats.get("vigorousIntensityMinutes"),
+            "spo2":                       stats.get("averageSpo2"),
+            "respiration_rate":           stats.get("avgWakingRespirationValue"),
+            "acute_load":                 acute_load,
+            "training_readiness_score":   readiness_score,
+            "training_readiness_level":   readiness_level,
+            "recovery_time_minutes":      recovery_time,
         }, on_conflict="date").execute()
 
         today_hrv = hrv_value
@@ -414,7 +457,6 @@ def sync_trainingpeaks():
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
 
-    # Collect all sessions grouped by date
     sessions_by_date = {}
     for component in cal.walk():
         if component.name != "VEVENT":
@@ -434,7 +476,6 @@ def sync_trainingpeaks():
             sessions_by_date[event_date] = []
         sessions_by_date[event_date].append(text)
 
-    # Upsert one row per date with all sessions combined
     for event_date, sessions in sessions_by_date.items():
         combined = "\n\n".join(sessions)
         db.table("training_load").upsert({
@@ -491,8 +532,8 @@ def weekly_summary():
         messages=[{"role": "user", "content": f"""Write a concise weekly training summary for an athlete. Use the actual numbers.
 Structure it as:
 1. Week overview (2 sentences)
-2. Training load (sessions completed, total distance, total time, gym sessions)
-3. Recovery trends (HRV, sleep, Body Battery patterns)
+2. Training load (sessions completed, total distance, total time, gym sessions, acute load trend)
+3. Recovery trends (HRV, sleep stages, Body Battery, stress score, training readiness)
 4. Compliance (how well planned vs actual matched, reference execution scores)
 5. One key insight or recommendation for next week
 
@@ -508,7 +549,7 @@ TRAINING PLAN:
 GYM SESSIONS:
 {json.dumps(gym, indent=2, default=str)}
 
-Keep it under 250 words. Use plain text, no markdown."""}]
+Keep it under 300 words. Use plain text, no markdown."""}]
     )
 
     summary = response.content[0].text
@@ -572,50 +613,6 @@ def backfill():
             print(f"Failed for {d}: {e}")
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
-
-@app.route("/debug-activity", methods=["GET"])
-def debug_activity():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    activity_id = request.args.get("id")
-    if not activity_id:
-        return "Please provide ?id=your_garmin_activity_id", 400
-    garmin  = get_garmin()
-    details = garmin.get_activity(int(activity_id))
-    return json.dumps(details, indent=2, default=str), 200
-
-@app.route("/debug-wellness", methods=["GET"])
-def debug_wellness():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    garmin = get_garmin()
-    from datetime import date
-    d = request.args.get("date", date.today().isoformat())
-    results = {}
-    try:
-        results["stats"] = garmin.get_stats(d)
-    except Exception as e:
-        results["stats_error"] = str(e)
-    try:
-        results["training_load"] = garmin.get_training_load(d)
-    except Exception as e:
-        results["training_load_error"] = str(e)
-    try:
-        results["training_readiness"] = garmin.get_training_readiness(d)
-    except Exception as e:
-        results["training_readiness_error"] = str(e)
-    return json.dumps(results, indent=2, default=str), 200
-
-@app.route("/debug-hevy", methods=["GET"])
-def debug_hevy():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    headers  = {"api-key": os.environ["HEVY_API_KEY"]}
-    response = requests.get(
-        "https://api.hevyapp.com/v1/workouts?page=1&pageSize=5",
-        headers=headers
-    )
-    return json.dumps(response.json(), indent=2, default=str), 200
 
 @app.route("/telegram", methods=["POST"])
 def telegram():
@@ -690,7 +687,7 @@ def telegram():
 
     context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
 
-WELLNESS (HRV, sleep, Body Battery, resting HR):
+WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):
 {json.dumps(wellness, indent=2, default=str)}
 
 CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score, cadence, stamina:
@@ -721,7 +718,13 @@ When asked about conditions, reference the weather data if available.
 execution_score is Garmin's workout compliance score (0-100).
 directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.
 Training effect aerobic scale: 0-5 where 5 is highly impacting.
-Stamina is percentage remaining at start and end of activity."""
+Stamina is percentage remaining at start and end of activity.
+training_readiness_score is Garmin's daily readiness out of 100.
+training_readiness_level is LOW, MODERATE or HIGH.
+acute_load is Garmin's 7-day training load — higher means more recent stress.
+recovery_time_minutes is Garmin's estimated time needed before next hard effort.
+sleep_deep_hours, sleep_rem_hours, sleep_light_hours show sleep quality breakdown.
+stress_score is average daily stress (0-100, lower is better)."""
 
     _conversation_history.append({"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"})
 
