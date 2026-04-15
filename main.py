@@ -74,20 +74,23 @@ def extract_splits(garmin, activity_id):
 
 def extract_weather(garmin, activity_id):
     try:
-        details = garmin.get_activity(activity_id)
-
-        weather = details.get("weatherAndAirQuality")
-        if not weather:
-            weather = details.get("activityWeather")
+        weather = garmin.get_activity_weather(activity_id)
         if not weather:
             return None
 
+        def f_to_c(f):
+            if f is None:
+                return None
+            return round((f - 32) * 5 / 9, 1)
+
         return {
-            "temp_c":     weather.get("temperature") or weather.get("temp"),
-            "humidity":   weather.get("relativeHumidity") or weather.get("humidity"),
-            "conditions": weather.get("weatherDescriptor") or weather.get("weatherType"),
+            "temp_c":     f_to_c(weather.get("temp")),
+            "humidity":   weather.get("relativeHumidity"),
+            "conditions": weather.get("weatherTypeDTO", {}).get("desc"),
             "wind_speed": weather.get("windSpeed"),
-            "feels_like": weather.get("apparentTemperature"),
+            "wind_dir":   weather.get("windDirectionCompassPoint"),
+            "feels_like": f_to_c(weather.get("apparentTemp")),
+            "station":    weather.get("weatherStationDTO", {}).get("name"),
         }
     except Exception as e:
         print(f"Weather fetch failed for activity {activity_id}: {e}")
