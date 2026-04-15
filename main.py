@@ -75,13 +75,21 @@ def extract_splits(garmin, activity_id):
 def extract_weather(garmin, activity_id):
     try:
         details = garmin.get_activity(activity_id)
-        weather = details.get("weatherAndAirQuality", {})
+        
+        # Try weatherAndAirQuality first
+        weather = details.get("weatherAndAirQuality")
+        
+        # If not found try activityWeather
+        if not weather:
+            weather = details.get("activityWeather")
+        
         if not weather:
             return None
+            
         return {
-            "temp_c":     weather.get("temperature"),
-            "humidity":   weather.get("relativeHumidity"),
-            "conditions": weather.get("weatherDescriptor"),
+            "temp_c":     weather.get("temperature") or weather.get("temp"),
+            "humidity":   weather.get("relativeHumidity") or weather.get("humidity"),
+            "conditions": weather.get("weatherDescriptor") or weather.get("weatherType"),
             "wind_speed": weather.get("windSpeed"),
             "feels_like": weather.get("apparentTemperature"),
         }
