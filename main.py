@@ -468,7 +468,18 @@ def backfill():
             print(f"Failed for {d}: {e}")
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
-    
+
+@app.route("/debug-hevy", methods=["GET"])
+def debug_hevy():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    headers = {"api-key": os.environ["HEVY_API_KEY"]}
+    response = requests.get(
+        "https://api.hevyapp.com/v1/workouts?page=1&pageSize=5",
+        headers=headers
+    )
+    return json.dumps(response.json(), indent=2, default=str), 200
+
 @app.route("/debug-activity", methods=["GET"])
 def debug_activity():
     if not check_sync_auth():
