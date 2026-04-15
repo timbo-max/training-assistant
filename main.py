@@ -584,6 +584,28 @@ def debug_activity():
     details = garmin.get_activity(int(activity_id))
     return json.dumps(details, indent=2, default=str), 200
 
+@app.route("/debug-wellness", methods=["GET"])
+def debug_wellness():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    garmin = get_garmin()
+    from datetime import date
+    d = request.args.get("date", date.today().isoformat())
+    results = {}
+    try:
+        results["stats"] = garmin.get_stats(d)
+    except Exception as e:
+        results["stats_error"] = str(e)
+    try:
+        results["training_load"] = garmin.get_training_load(d)
+    except Exception as e:
+        results["training_load_error"] = str(e)
+    try:
+        results["training_readiness"] = garmin.get_training_readiness(d)
+    except Exception as e:
+        results["training_readiness_error"] = str(e)
+    return json.dumps(results, indent=2, default=str), 200
+
 @app.route("/debug-hevy", methods=["GET"])
 def debug_hevy():
     if not check_sync_auth():
