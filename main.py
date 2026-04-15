@@ -75,17 +75,13 @@ def extract_splits(garmin, activity_id):
 def extract_weather(garmin, activity_id):
     try:
         details = garmin.get_activity(activity_id)
-        
-        # Try weatherAndAirQuality first
+
         weather = details.get("weatherAndAirQuality")
-        
-        # If not found try activityWeather
         if not weather:
             weather = details.get("activityWeather")
-        
         if not weather:
             return None
-            
+
         return {
             "temp_c":     weather.get("temperature") or weather.get("temp"),
             "humidity":   weather.get("relativeHumidity") or weather.get("humidity"),
@@ -116,6 +112,12 @@ def extract_activity_details(garmin, activity_id):
         except Exception:
             pass
 
+        direct_compliance = summary.get("directWorkoutComplianceScore")
+        if direct_compliance is not None:
+            execution_score = float(direct_compliance)
+
+        perceived_effort = summary.get("directWorkoutRpe") or summary.get("perceivedExertion")
+
         return {
             "avg_pace_min_km":           avg_pace,
             "avg_cadence":               summary.get("averageRunCadence") or
@@ -125,7 +127,7 @@ def extract_activity_details(garmin, activity_id):
             "exercise_load":             summary.get("activityTrainingLoad"),
             "body_battery_impact":       summary.get("differenceBodyBattery"),
             "execution_score":           execution_score,
-            "perceived_effort":          summary.get("perceivedExertion"),
+            "perceived_effort":          perceived_effort,
             "stamina_start":             summary.get("beginPotentialStamina"),
             "stamina_end":               summary.get("endPotentialStamina"),
             "moving_time_seconds":       summary.get("movingDuration"),
@@ -177,7 +179,8 @@ Compare the planned vs actual workout. Consider:
 - Heart rate data as evidence of effort zones
 - Training effect as evidence of intensity achieved
 - Execution score from Garmin if available (0-100)
-- Perceived effort and stamina data
+- Perceived effort (directWorkoutRpe is 0-100 scale, 70 = 7/10)
+- Stamina data
 
 Return ONLY a JSON object:
 {{"score": <integer 0-100>, "notes": "<two sentences: what matched and what didn't>"}}
@@ -268,17 +271,17 @@ def sync_hevy(db, target_date=None):
                 )
 
                 db.table("gym_exercises").upsert({
-                    "gym_session_id":        session_id,
-                    "hevy_workout_id":       hevy_id,
-                    "date":                  workout_date.isoformat(),
-                    "exercise_index":        exercise.get("index"),
-                    "exercise_name":         exercise.get("title"),
-                    "exercise_template_id":  exercise.get("exercise_template_id"),
-                    "superset_id":           exercise.get("superset_id"),
-                    "sets":                  json.dumps(sets),
-                    "total_volume_kg":       round(total_volume, 2) if total_volume else None,
-                    "max_weight_kg":         max_weight,
-                    "total_reps":            total_reps if total_reps > 0 else None,
+                    "gym_session_id":         session_id,
+                    "hevy_workout_id":        hevy_id,
+                    "date":                   workout_date.isoformat(),
+                    "exercise_index":         exercise.get("index"),
+                    "exercise_name":          exercise.get("title"),
+                    "exercise_template_id":   exercise.get("exercise_template_id"),
+                    "superset_id":            exercise.get("superset_id"),
+                    "sets":                   json.dumps(sets),
+                    "total_volume_kg":        round(total_volume, 2) if total_volume else None,
+                    "max_weight_kg":          max_weight,
+                    "total_reps":             total_reps if total_reps > 0 else None,
                     "total_duration_seconds": total_duration if total_duration > 0 else None,
                 }, on_conflict="gym_session_id,exercise_index").execute()
 
@@ -635,11 +638,11 @@ def telegram():
         send_telegram(chat_id, "Sorry, you are not authorised to use this bot.")
         return "ok", 200
 
-    week_ago   = (date.today() - timedelta(days=7)).isoformat()
-    wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
-    activities = db.table("activities").select("*").gte("date", week_ago).order("date", desc=True).execute().data
-    training   = db.table("training_load").select("*").gte("date", week_ago).order("date", desc=True).execute().data
-    gym_sessions = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    week_ago      = (date.today() - timedelta(days=7)).isoformat()
+    wellness      = db.table("daily_wellness").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    activities    = db.table("activities").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    training      = db.table("training_load").select("*").gte("date", week_ago).order("date", desc=True).execute().data
+    gym_sessions  = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
     context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
@@ -647,7 +650,7 @@ def telegram():
 WELLNESS (HRV, sleep, Body Battery, resting HR):
 {json.dumps(wellness, indent=2, default=str)}
 
-CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score:
+CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score, cadence, stamina:
 {json.dumps(activities, indent=2, default=str)}
 
 TRAINING PLAN (planned workouts from coach):
@@ -664,8 +667,9 @@ If data is missing for a day, mention it. Give practical training advice based o
 Always consider the planned workout for today when giving advice.
 When asked about pace or splits, reference the per km split data directly.
 When asked about gym progress, reference weights, volume and reps trends across sessions.
-When asked about conditions, reference the weather data captured during the activity.
-Execution score is Garmin's own compliance metric out of 100.
+When asked about conditions, reference the weather data if available.
+execution_score is Garmin's workout compliance score (0-100).
+directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.
 Training effect aerobic scale: 0-5 where 5 is highly impacting.
 Stamina is percentage remaining at start and end of activity."""
 
