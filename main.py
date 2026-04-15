@@ -586,6 +586,20 @@ def debug_hevy():
     )
     return json.dumps(response.json(), indent=2, default=str), 200
 
+@app.route("/debug-weather", methods=["GET"])
+def debug_weather():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    activity_id = request.args.get("id")
+    if not activity_id:
+        return "Please provide ?id=your_garmin_activity_id", 400
+    garmin = get_garmin()
+    try:
+        weather = garmin.get_activity_weather(int(activity_id))
+        return json.dumps(weather, indent=2, default=str), 200
+    except Exception as e:
+        return f"Error: {e}", 200
+
 @app.route("/strava", methods=["GET", "POST"])
 def strava():
     if request.method == "GET":
