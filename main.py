@@ -413,6 +413,9 @@ def sync_trainingpeaks():
     today    = date.today()
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
+
+    # Collect all sessions grouped by date
+    sessions_by_date = {}
     for component in cal.walk():
         if component.name != "VEVENT":
             continue
@@ -426,10 +429,19 @@ def sync_trainingpeaks():
             continue
         summary     = str(component.get("SUMMARY", ""))
         description = str(component.get("DESCRIPTION", ""))
+        text = f"{summary} — {description}".strip(" —")
+        if event_date not in sessions_by_date:
+            sessions_by_date[event_date] = []
+        sessions_by_date[event_date].append(text)
+
+    # Upsert one row per date with all sessions combined
+    for event_date, sessions in sessions_by_date.items():
+        combined = "\n\n".join(sessions)
         db.table("training_load").upsert({
             "date":            event_date.isoformat(),
-            "planned_workout": f"{summary} — {description}".strip(" —"),
+            "planned_workout": combined,
         }, on_conflict="date").execute()
+
     print("TrainingPeaks sync complete")
 
 @app.route("/sync", methods=["GET"])
