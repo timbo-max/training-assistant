@@ -6,23 +6,24 @@ A personal AI-powered training assistant that automatically syncs data from Garm
 
 ## What it does
 
-- Automatically pulls your Garmin wellness data (HRV, sleep, Body Battery, resting HR) and activities (runs, rides) including per km splits, weather, training effect, cadence, and stamina
+- Automatically pulls your Garmin wellness data (HRV, sleep, Body Battery, resting HR) and activities (runs, rides) including per km splits, weather conditions, training effect, cadence, stamina, execution score, and perceived effort
 - Syncs your planned sessions from TrainingPeaks via iCal
 - Pulls your gym sessions from Hevy including every exercise, set, reps, and weight
 - Scores your workout compliance by comparing planned vs actual sessions
 - Sends a HRV fatigue alert via Telegram if your HRV drops 15% below your 7-day average
 - Sends an automated weekly training summary every Sunday at 6pm
-- Lets you ask anything about your training data via a private Telegram bot
+- Lets you chat naturally with your training data via a private Telegram bot with 5-exchange conversation memory
 
 ---
 
 ## Architecture
 
 ```
-Garmin Fenix → Garmin Connect → Strava webhook → Railway backend → Supabase
+Garmin Fenix → Garmin Connect → Railway backend → Supabase
 Hevy app → Hevy API → Railway backend → Supabase
 TrainingPeaks → iCal feed → Railway backend → Supabase
-cron-job.org → Railway /sync (6am daily) → Supabase
+cron-job.org → /sync (6am daily) → Railway → Supabase
+cron-job.org → /weekly-summary (Sunday 6pm) → Telegram
 Telegram message → Railway /telegram → Claude AI → Supabase → Telegram reply
 ```
 
@@ -37,8 +38,7 @@ Telegram message → Railway /telegram → Claude AI → Supabase → Telegram r
 | Garmin Connect | Activity and wellness data source | Free (unofficial API) |
 | Hevy | Gym workout tracking | $3/month PRO required for API |
 | TrainingPeaks | Planned session data via iCal | Existing subscription |
-| Strava | Webhook trigger on activity upload | Free |
-| cron-job.org | Daily scheduled sync | Free |
+| cron-job.org | Daily and weekly scheduled syncs | Free |
 
 ---
 
@@ -47,7 +47,7 @@ Telegram message → Railway /telegram → Claude AI → Supabase → Telegram r
 | Table | Contents |
 |---|---|
 | `daily_wellness` | HRV, sleep score, sleep hours, Body Battery, resting HR — one row per day |
-| `activities` | Runs, rides etc. with splits, weather, training effect, execution score, cadence, stamina |
+| `activities` | Runs, rides etc. with splits, weather, training effect, execution score, cadence, stamina, compliance |
 | `training_load` | Planned sessions from TrainingPeaks with compliance scoring |
 | `gym_sessions` | Hevy workout sessions with duration and title |
 | `gym_exercises` | Every exercise with sets, reps, weight, volume, and max weight |
@@ -62,13 +62,24 @@ Telegram message → Railway /telegram → Claude AI → Supabase → Telegram r
 | `/sync-date?date=YYYY-MM-DD` | GET | Syncs a specific date — useful for recovering missed days |
 | `/weekly-summary` | GET | Generates and sends weekly summary to Telegram |
 | `/backfill` | GET | Imports last 90 days of Garmin activities |
-| `/strava` | GET/POST | Strava webhook endpoint |
 | `/telegram` | POST | Telegram bot webhook |
 | `/debug-activity?id=XXX` | GET | Returns raw Garmin activity JSON for debugging |
 | `/debug-hevy` | GET | Returns last 5 Hevy workouts for debugging |
 | `/` | GET | Health check |
 
-All endpoints except `/strava` and `/telegram` require `?token=YOUR_SYNC_SECRET`.
+All endpoints except `/telegram` require `?token=YOUR_SYNC_SECRET`.
+
+---
+
+## Telegram commands
+
+| Command | Description |
+|---|---|
+| `/sync` | Syncs today's data immediately |
+| `/sync YYYY-MM-DD` | Syncs a specific date e.g. `/sync 2026-04-15` |
+| `/clear` | Clears conversation history for a fresh start |
+| `/help` | Shows available commands |
+| Any message | Chat naturally about your training data |
 
 ---
 
@@ -86,9 +97,6 @@ Set these in Railway:
 | `TELEGRAM_TOKEN` | Telegram bot token from @BotFather |
 | `TELEGRAM_USER_ID` | Your Telegram numeric user ID (from @userinfobot) |
 | `TRAININGPEAKS_ICAL_URL` | TrainingPeaks calendar iCal URL (use https:// not webcal://) |
-| `STRAVA_CLIENT_ID` | Strava API application client ID |
-| `STRAVA_CLIENT_SECRET` | Strava API application client secret |
-| `STRAVA_VERIFY_TOKEN` | Any random string used to verify the Strava webhook |
 | `HEVY_API_KEY` | Hevy API key (requires Hevy PRO subscription) |
 | `SYNC_SECRET` | Any random string used to protect sync endpoints |
 
@@ -213,18 +221,7 @@ alter table gym_exercises enable row level security;
 https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-railway-url.up.railway.app/telegram
 ```
 
-### 4. Strava — register the webhook
-
-Run this in your terminal (replace placeholders):
-```bash
-curl -X POST "https://www.strava.com/api/v3/push_subscriptions" \
-  -F "client_id=YOUR_CLIENT_ID" \
-  -F "client_secret=YOUR_CLIENT_SECRET" \
-  -F "callback_url=https://your-railway-url.up.railway.app/strava" \
-  -F "verify_token=YOUR_STRAVA_VERIFY_TOKEN"
-```
-
-### 5. cron-job.org — schedule daily sync
+### 4. cron-job.org — schedule daily sync and weekly summary
 
 Create two jobs at [cron-job.org](https://cron-job.org):
 
@@ -238,7 +235,7 @@ https://your-railway-url.up.railway.app/sync?token=YOUR_SYNC_SECRET
 https://your-railway-url.up.railway.app/weekly-summary?token=YOUR_SYNC_SECRET
 ```
 
-### 6. Backfill historical data
+### 5. Backfill historical data
 
 Once deployed, import the last 90 days of Garmin activities:
 ```
@@ -250,27 +247,37 @@ https://your-railway-url.up.railway.app/backfill?token=YOUR_SYNC_SECRET
 ## Daily flow
 
 1. You finish a session and save it on your Garmin Fenix
-2. Garmin Connect syncs to Strava automatically
-3. Strava fires a webhook to Railway
-4. Railway pulls that day's Garmin wellness and activity data
-5. Railway pulls your TrainingPeaks planned session
-6. Railway pulls any new Hevy gym sessions
-7. Compliance scoring runs automatically
-8. HRV fatigue check runs — alerts you via Telegram if needed
-9. Open Telegram and ask your bot about the session
+2. Garmin Connect syncs the data
+3. At 6am the next morning, the cron job pulls all data automatically
+4. Wellness, activities, splits, weather, compliance score all land in Supabase
+5. Open Telegram and ask your bot about the session — or type `/sync` for an immediate sync
+
+For gym sessions:
+1. Log your session in Hevy with exercises, sets, reps, and weights
+2. The daily 6am cron job pulls it from the Hevy API
+3. Ask the bot about your lifts, progress, or what to do next session
 
 ---
 
 ## Example questions to ask your bot
 
+**Running**
 - "How was my recovery this week?"
 - "Was my pacing consistent in today's run?"
-- "It felt really hard today — was the heat a factor?"
-- "How does my bench press compare to last month?"
-- "What gym session should I do today?"
-- "How did I go against my planned session?"
+- "It felt really hard — was the heat a factor?"
+- "How does my long run compare to last month?"
 - "What's my HRV trend been this week?"
+
+**Gym**
+- "What gym session should I do today?"
+- "How is my bench press progressing?"
 - "How much total volume did I lift yesterday?"
+- "What exercises am I improving on?"
+
+**General**
+- "What should I do tomorrow based on my recovery?"
+- "How did I go against my planned session?"
+- "Give me a weekly summary"
 
 ---
 
@@ -281,7 +288,6 @@ flask
 garminconnect
 supabase
 anthropic
-twilio
 gunicorn
 icalendar
 ```
@@ -294,4 +300,10 @@ icalendar
 - The Telegram bot only responds to your specific Telegram user ID
 - All credentials are stored as Railway environment variables — never in code
 - Supabase Row Level Security is enabled on all tables
-- Rotate credentials periodically, especially after any accidental exposure
+- Rotate credentials periodically
+
+---
+
+## Notes on Garmin rate limiting
+
+The Garmin Connect unofficial API rate limits login attempts. If you see 429 errors in Railway logs, wait 2-3 hours before trying again. In normal daily use the single 6am sync is well within limits. Avoid hitting `/sync` or `/backfill` repeatedly in a short period.
