@@ -614,6 +614,17 @@ def backfill():
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
 
+@app.route("/debug-routines", methods=["GET"])
+def debug_routines():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    headers  = {"api-key": os.environ["HEVY_API_KEY"]}
+    response = requests.get(
+        "https://api.hevyapp.com/v1/routines?page=1&pageSize=5",
+        headers=headers
+    )
+    return json.dumps(response.json(), indent=2, default=str), 200
+
 @app.route("/telegram", methods=["POST"])
 def telegram():
     global _conversation_history
