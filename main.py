@@ -224,9 +224,9 @@ def create_hevy_routine(routine_data):
             "api-key": os.environ["HEVY_API_KEY"],
             "Content-Type": "application/json"
         }
-        # Strip index from sets — Hevy routines don't allow it
         cleaned = json.loads(json.dumps(routine_data))
         for ex in cleaned.get("exercises", []):
+            ex.pop("index", None)
             ex["sets"] = [
                 {k: v for k, v in s.items() if k != "index"}
                 for s in ex.get("sets", [])
