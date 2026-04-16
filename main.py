@@ -14,6 +14,7 @@ _supabase = None
 _anthropic = None
 _garmin = None
 _conversation_history = []
+_pending_routine = None
 
 def get_supabase():
     global _supabase
@@ -217,6 +218,74 @@ def check_hrv_alert(db, today_hrv):
         send_telegram_to_me(msg)
         print(f"HRV alert sent: {msg}")
 
+def create_hevy_routine(routine_data):
+    try:
+        headers = {
+            "api-key": os.environ["HEVY_API_KEY"],
+            "Content-Type": "application/json"
+        }
+        response = requests.post(
+            "https://api.hevyapp.com/v1/routines",
+            headers=headers,
+            json={"routine": routine_data}
+        )
+        if response.status_code in [200, 201]:
+            return True, response.json()
+        else:
+            return False, response.text
+    except Exception as e:
+        return False, str(e)
+
+def classify_session_type(exercises):
+    push_muscles = ["chest", "shoulder", "tricep", "press", "push", "dip", "fly", "pec"]
+    pull_muscles = ["row", "pull", "curl", "bicep", "lat", "back", "deadlift", "shrug"]
+    leg_muscles  = ["squat", "leg", "lunge", "calf", "glute", "hamstring", "quad", "hip"]
+
+    push_count = 0
+    pull_count = 0
+    leg_count  = 0
+
+    for ex in exercises:
+        name = ex.get("title", "").lower()
+        if any(m in name for m in push_muscles):
+            push_count += 1
+        if any(m in name for m in pull_muscles):
+            pull_count += 1
+        if any(m in name for m in leg_muscles):
+            leg_count += 1
+
+    total = push_count + pull_count + leg_count
+    if total == 0:
+        return "Full Body"
+
+    dominant = max(push_count, pull_count, leg_count)
+    if dominant == push_count and push_count > pull_count and push_count > leg_count:
+        return "Push"
+    elif dominant == pull_count and pull_count > push_count and pull_count > leg_count:
+        return "Pull"
+    elif dominant == leg_count and leg_count > push_count and leg_count > pull_count:
+        return "Legs"
+    else:
+        return "Full Body"
+
+def format_routine_for_telegram(routine_data):
+    lines = [f"Suggested session: {routine_data['title']}", ""]
+    for i, ex in enumerate(routine_data["exercises"]):
+        sets = ex.get("sets", [])
+        set_lines = []
+        for s in sets:
+            if s.get("duration_seconds"):
+                set_lines.append(f"{s['duration_seconds']}s")
+            elif s.get("weight_kg") and s.get("reps"):
+                set_lines.append(f"{s['weight_kg']}kg x {s['reps']}")
+            elif s.get("reps"):
+                set_lines.append(f"{s['reps']} reps")
+        sets_str = ", ".join(set_lines)
+        lines.append(f"{i+1}. {ex['title']} — {sets_str}")
+    lines.append("")
+    lines.append("Reply 'yes' to create this routine in Hevy, or 'no' to cancel.")
+    return "\n".join(lines)
+
 def sync_hevy(db, target_date=None):
     try:
         headers = {"api-key": os.environ["HEVY_API_KEY"]}
@@ -312,7 +381,6 @@ def sync_day(garmin, db, d):
             except Exception:
                 pass
 
-        # Sleep stages
         sleep_dto   = sleep.get("dailySleepDTO", {})
         deep_hours  = None
         rem_hours   = None
@@ -330,7 +398,6 @@ def sync_day(garmin, db, d):
         except Exception:
             pass
 
-        # Training readiness — use most recent entry
         readiness_score = None
         readiness_level = None
         acute_load      = None
@@ -614,20 +681,9 @@ def backfill():
         current += timedelta(days=1)
     return f"Backfill complete — activities imported for {len(results)} days", 200
 
-@app.route("/debug-routines", methods=["GET"])
-def debug_routines():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    headers  = {"api-key": os.environ["HEVY_API_KEY"]}
-    response = requests.get(
-        "https://api.hevyapp.com/v1/routines?page=1&pageSize=5",
-        headers=headers
-    )
-    return json.dumps(response.json(), indent=2, default=str), 200
-
 @app.route("/telegram", methods=["POST"])
 def telegram():
-    global _conversation_history
+    global _conversation_history, _pending_routine
     db = get_supabase()
     ai = get_anthropic()
 
@@ -645,9 +701,25 @@ def telegram():
         send_telegram(chat_id, "Sorry, you are not authorised to use this bot.")
         return "ok", 200
 
+    # --- Pending routine confirmation ---
+    if _pending_routine:
+        if user_msg.lower() in ["yes", "yep", "yeah", "confirm", "looks good", "do it", "ok", "okay", "go ahead"]:
+            success, result = create_hevy_routine(_pending_routine)
+            if success:
+                send_telegram(chat_id, f"Done! {_pending_routine['title']} has been created in Hevy. Open the app and start it when you're ready!")
+            else:
+                send_telegram(chat_id, f"Something went wrong creating the routine: {result}")
+            _pending_routine = None
+            return "ok", 200
+        elif user_msg.lower() in ["no", "nope", "cancel", "don't", "skip"]:
+            _pending_routine = None
+            send_telegram(chat_id, "No problem — routine cancelled. Ask me anything else!")
+            return "ok", 200
+
     # --- Commands ---
     if user_msg.lower() == "/clear":
         _conversation_history = []
+        _pending_routine = None
         send_telegram(chat_id, "Conversation history cleared!")
         return "ok", 200
 
@@ -683,7 +755,9 @@ def telegram():
             "/sync YYYY-MM-DD — sync a specific date e.g. /sync 2026-04-15\n"
             "/clear — clear conversation history\n"
             "/help — show this message\n\n"
-            "Or just ask me anything about your training!"
+            "Or just ask me anything about your training!\n\n"
+            "To get a gym session suggestion, just ask:\n"
+            "'Suggest a gym session for today'"
         )
         send_telegram(chat_id, help_text)
         return "ok", 200
@@ -696,6 +770,114 @@ def telegram():
     gym_sessions  = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
+    # Build exercise library from history for routine creation
+    all_exercises = db.table("gym_exercises").select(
+        "exercise_name, exercise_template_id, max_weight_kg, total_reps, sets"
+    ).order("date", desc=True).execute().data
+
+    # Deduplicate by template ID keeping most recent
+    seen = {}
+    for ex in all_exercises:
+        tid = ex.get("exercise_template_id")
+        if tid and tid not in seen:
+            seen[tid] = ex
+    exercise_library = list(seen.values())
+
+    is_routine_request = any(phrase in user_msg.lower() for phrase in [
+        "suggest a gym", "gym session", "suggest a session", "create a routine",
+        "make a routine", "plan a workout", "suggest a workout", "gym workout"
+    ])
+
+    if is_routine_request:
+        routine_prompt = f"""You are a personal trainer creating a gym session routine.
+
+Today is {date.today().strftime('%d %b %Y')}.
+
+ATHLETE RECOVERY DATA (use this to calibrate intensity):
+{json.dumps(wellness[:3] if wellness else [], indent=2, default=str)}
+
+RECENT GYM SESSIONS (avoid repeating same exercises too soon):
+{json.dumps(gym_sessions[:5] if gym_sessions else [], indent=2, default=str)}
+
+RECENT GYM EXERCISES WITH WEIGHTS:
+{json.dumps(gym_exercises[:30] if gym_exercises else [], indent=2, default=str)}
+
+AVAILABLE EXERCISE LIBRARY (ONLY use exercises from this list — you must use the exact exercise_template_id):
+{json.dumps(exercise_library, indent=2, default=str)}
+
+Create a balanced gym session. Rules:
+- ONLY use exercises from the AVAILABLE EXERCISE LIBRARY above
+- Use the exact exercise_template_id from the library for each exercise
+- Base weights on recent performance — progress by 2.5-5kg if last session felt strong, maintain if moderate, reduce if recovery is poor
+- Consider today's recovery: HRV, readiness score, body battery, stress
+- Avoid exercises done in the last 48 hours if possible
+- Classify the session as Push, Pull, Legs, or Full Body based on the exercises chosen
+- Include 6-10 exercises with 3-4 sets each
+- For weighted exercises include weight_kg and reps
+- For timed exercises include duration_seconds
+
+Return ONLY a JSON object in this exact format:
+{{
+  "session_type": "Push",
+  "exercises": [
+    {{
+      "title": "Incline Chest Press (Machine)",
+      "exercise_template_id": "FBF92739",
+      "sets": [
+        {{"index": 0, "type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
+        {{"index": 1, "type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
+        {{"index": 2, "type": "normal", "weight_kg": 40, "reps": 6, "duration_seconds": null, "distance_meters": null, "custom_metric": null}}
+      ]
+    }}
+  ]
+}}
+
+Return only the JSON, nothing else."""
+
+        routine_response = ai.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": routine_prompt}]
+        )
+
+        try:
+            raw = routine_response.content[0].text.strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            routine_json = json.loads(raw)
+
+            session_type = routine_json.get("session_type", "Full Body")
+            today_str    = date.today().strftime("%d %b %Y")
+            title        = f"{session_type} - {today_str}"
+
+            exercises = []
+            for i, ex in enumerate(routine_json.get("exercises", [])):
+                exercises.append({
+                    "index":                i,
+                    "title":                ex.get("title"),
+                    "notes":                None,
+                    "exercise_template_id": ex.get("exercise_template_id"),
+                    "superset_id":          None,
+                    "rest_seconds":         90,
+                    "sets":                 ex.get("sets", []),
+                })
+
+            _pending_routine = {
+                "title":     title,
+                "folder_id": None,
+                "exercises": exercises,
+            }
+
+            reply = format_routine_for_telegram(_pending_routine)
+
+        except Exception as e:
+            print(f"Routine generation failed: {e}")
+            reply = "Sorry, I had trouble generating the routine. Try asking again!"
+            _pending_routine = None
+
+        send_telegram(chat_id, reply)
+        return "ok", 200
+
+    # --- Standard chat ---
     context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
 
 WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):
