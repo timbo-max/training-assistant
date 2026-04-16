@@ -224,10 +224,17 @@ def create_hevy_routine(routine_data):
             "api-key": os.environ["HEVY_API_KEY"],
             "Content-Type": "application/json"
         }
+        # Strip index from sets — Hevy routines don't allow it
+        cleaned = json.loads(json.dumps(routine_data))
+        for ex in cleaned.get("exercises", []):
+            ex["sets"] = [
+                {k: v for k, v in s.items() if k != "index"}
+                for s in ex.get("sets", [])
+            ]
         response = requests.post(
             "https://api.hevyapp.com/v1/routines",
             headers=headers,
-            json={"routine": routine_data}
+            json={"routine": cleaned}
         )
         if response.status_code in [200, 201]:
             return True, response.json()
@@ -770,7 +777,7 @@ def telegram():
     gym_sessions  = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
-    # Build exercise library from history for routine creation
+    # Build exercise library from full history
     all_exercises = db.table("gym_exercises").select(
         "exercise_name, exercise_template_id, max_weight_kg, total_reps, sets"
     ).order("date", desc=True).execute().data
@@ -824,9 +831,9 @@ Return ONLY a JSON object in this exact format:
       "title": "Incline Chest Press (Machine)",
       "exercise_template_id": "FBF92739",
       "sets": [
-        {{"index": 0, "type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
-        {{"index": 1, "type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
-        {{"index": 2, "type": "normal", "weight_kg": 40, "reps": 6, "duration_seconds": null, "distance_meters": null, "custom_metric": null}}
+        {{"type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
+        {{"type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
+        {{"type": "normal", "weight_kg": 40, "reps": 6, "duration_seconds": null, "distance_meters": null, "custom_metric": null}}
       ]
     }}
   ]
