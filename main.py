@@ -520,9 +520,10 @@ def sync_day(garmin, db, d):
 def sync_garmin():
     db     = get_supabase()
     garmin = get_garmin()
-    yesterday = date.today() - timedelta(days=1)
-    sync_day(garmin, db, yesterday.isoformat())
-    print(f"Garmin sync complete for {yesterday.isoformat()}")
+    from datetime import timezone
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    sync_day(garmin, db, since.date().isoformat())
+    print(f"Garmin sync complete for {since.date().isoformat()}")
 
 def sync_trainingpeaks():
     db       = get_supabase()
