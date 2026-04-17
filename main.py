@@ -520,8 +520,7 @@ def sync_day(garmin, db, d):
 def sync_garmin():
     db     = get_supabase()
     garmin = get_garmin()
-    from datetime import timezone
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    since = datetime.now() - timedelta(hours=24)
     sync_day(garmin, db, since.date().isoformat())
     print(f"Garmin sync complete for {since.date().isoformat()}")
 
