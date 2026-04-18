@@ -269,24 +269,29 @@ def create_hevy_routine(routine_data):
         return False, str(e)
 
 def detect_session_type(user_msg):
-    msg = user_msg.lower()
-    if any(p in msg for p in ["pre run", "before my run", "before run", "pre-run"]):
-        return "Pre Run"
-    if any(p in msg for p in ["post run", "after my run", "after run", "post-run"]):
-        return "Post Run"
-    if any(p in msg for p in ["running maintenance", "run maintenance", "plyometric", "plyo"]):
-        return "Running Maintenance"
-    if any(p in msg for p in ["upper body", "upper-body"]):
-        return "Upper Body"
-    if any(p in msg for p in ["legs", "leg day", "lower body"]):
-        return "Legs"
-    if any(p in msg for p in ["push"]):
-        return "Push"
-    if any(p in msg for p in ["pull"]):
-        return "Pull"
-    if any(p in msg for p in ["full body", "full-body"]):
-        return "Full Body"
-    return None
+    ai = get_anthropic()
+    prompt = (
+        "Based on this gym session request, identify the session type.\n"
+        "Return ONLY one of these exact values: Push, Pull, Legs, Upper Body, Full Body, Running Maintenance, Pre Run, Post Run\n\n"
+        f"Request: \"{user_msg}\"\n\n"
+        "Rules:\n"
+        "- after a run or post run or after long run or after my run = Post Run\n"
+        "- before a run or pre run or before my run = Pre Run\n"
+        "- full body or full bosy or any full body variation = Full Body\n"
+        "- upper body = Upper Body\n"
+        "- running maintenance or plyometrics or plyo = Running Maintenance\n"
+        "- legs or leg day or lower body = Legs\n"
+        "- push = Push\n"
+        "- pull = Pull\n"
+        "- If unclear default to Full Body\n\n"
+        "Return only the session type, nothing else."
+    )
+    response = ai.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text.strip()
 
 SESSION_TYPE_DESCRIPTIONS = {
     "Push": "Chest, shoulders, triceps. Include pressing movements like chest press, shoulder press, dips, and tricep work. No pulling or leg movements.",
@@ -824,7 +829,6 @@ def telegram():
         if tid and tid not in seen:
             seen[tid] = ex
     exercise_history = list(seen.values())
-    history_template_ids = set(seen.keys())
 
     is_routine_request = any(phrase in user_msg.lower() for phrase in [
         "suggest a gym", "gym session", "suggest a session", "create a routine",
@@ -836,7 +840,6 @@ def telegram():
     if is_routine_request:
         detected_type = detect_session_type(user_msg)
 
-        # Fetch full Hevy exercise library for new exercise suggestions
         full_library = get_hevy_exercise_library()
         full_library_summary = [
             {"title": e.get("title"), "exercise_template_id": e.get("id")}
@@ -844,73 +847,55 @@ def telegram():
             if e.get("title") and e.get("id")
         ]
 
-        session_type_instruction = ""
-        if detected_type:
-            session_type_instruction = f"""
-SESSION TYPE REQUESTED: {detected_type}
-{SESSION_TYPE_DESCRIPTIONS.get(detected_type, "")}
-You MUST classify this session as "{detected_type}" in your response.
-"""
-        else:
-            types_list = "\n".join([f"- {k}: {v}" for k, v in SESSION_TYPE_DESCRIPTIONS.items()])
-            session_type_instruction = f"""
-No specific session type was requested. Choose the most appropriate type based on the athlete's recovery data and recent training history. Available types:
-{types_list}
-"""
+        session_type_instruction = (
+            f"SESSION TYPE REQUESTED: {detected_type}\n"
+            f"{SESSION_TYPE_DESCRIPTIONS.get(detected_type, '')}\n"
+            f"You MUST classify this session as \"{detected_type}\" in your response."
+        )
 
-        routine_prompt = f"""You are a personal trainer creating a gym session routine.
-
-Today is {date.today().strftime('%d %b %Y')}.
-
-{session_type_instruction}
-
-ATHLETE RECOVERY DATA (use this to calibrate intensity):
-{json.dumps(wellness[:3] if wellness else [], indent=2, default=str)}
-
-RECENT GYM SESSIONS (avoid repeating same exercises too soon):
-{json.dumps(gym_sessions[:5] if gym_sessions else [], indent=2, default=str)}
-
-RECENT GYM EXERCISES WITH WEIGHTS (prefer these as they have weight history):
-{json.dumps(gym_exercises[:30] if gym_exercises else [], indent=2, default=str)}
-
-EXERCISE HISTORY LIBRARY (exercises done before with known weights):
-{json.dumps(exercise_history, indent=2, default=str)}
-
-FULL HEVY EXERCISE LIBRARY (you may also use these if appropriate for the session type — use exact exercise_template_id):
-{json.dumps(full_library_summary, indent=2, default=str)}
-
-Rules:
-- Prefer exercises from the history library where possible as weights are known
-- You MAY use exercises from the full library if they suit the session type better
-- For exercises not in history, suggest a conservative starting weight and flag them
-- Use the exact exercise_template_id from whichever library the exercise comes from
-- Base weights on recent performance — progress by 2.5-5kg if last session felt strong
-- Consider today's recovery: HRV, readiness score, body battery, stress
-- Avoid exercises done in the last 48 hours if possible
-- Include 6-10 exercises with 3-4 sets each
-- For weighted exercises include weight_kg and reps
-- For timed exercises include duration_seconds
-- For plyometric exercises use reps, no weight_kg needed
-
-Return ONLY a JSON object in this exact format:
-{{
-  "session_type": "{detected_type or 'Full Body'}",
-  "new_exercises": ["Exercise Name 1", "Exercise Name 2"],
-  "exercises": [
-    {{
-      "title": "Incline Chest Press (Machine)",
-      "exercise_template_id": "FBF92739",
-      "sets": [
-        {{"type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
-        {{"type": "normal", "weight_kg": 37.5, "reps": 8, "duration_seconds": null, "distance_meters": null, "custom_metric": null}},
-        {{"type": "normal", "weight_kg": 40, "reps": 6, "duration_seconds": null, "distance_meters": null, "custom_metric": null}}
-      ]
-    }}
-  ]
-}}
-
-The "new_exercises" array should list the names of any exercises not in the history library so they can be flagged to the user.
-Return only the JSON, nothing else."""
+        routine_prompt = (
+            "You are a personal trainer creating a gym session routine.\n\n"
+            f"Today is {date.today().strftime('%d %b %Y')}.\n\n"
+            f"{session_type_instruction}\n\n"
+            "ATHLETE RECOVERY DATA (use this to calibrate intensity):\n"
+            f"{json.dumps(wellness[:3] if wellness else [], indent=2, default=str)}\n\n"
+            "RECENT GYM SESSIONS (avoid repeating same exercises too soon):\n"
+            f"{json.dumps(gym_sessions[:5] if gym_sessions else [], indent=2, default=str)}\n\n"
+            "RECENT GYM EXERCISES WITH WEIGHTS:\n"
+            f"{json.dumps(gym_exercises[:30] if gym_exercises else [], indent=2, default=str)}\n\n"
+            "EXERCISE HISTORY LIBRARY (exercises done before with known weights):\n"
+            f"{json.dumps(exercise_history, indent=2, default=str)}\n\n"
+            "FULL HEVY EXERCISE LIBRARY (you may also use these if appropriate — use exact exercise_template_id):\n"
+            f"{json.dumps(full_library_summary, indent=2, default=str)}\n\n"
+            "Rules:\n"
+            "- Prefer exercises from the history library where possible as weights are known\n"
+            "- You MAY use exercises from the full library if they suit the session type better\n"
+            "- For exercises not in history, suggest a conservative starting weight and flag them\n"
+            "- Use the exact exercise_template_id from whichever library the exercise comes from\n"
+            "- Base weights on recent performance — progress by 2.5-5kg if last session felt strong\n"
+            "- Consider today's recovery: HRV, readiness score, body battery, stress\n"
+            "- Avoid exercises done in the last 48 hours if possible\n"
+            "- Include 6-10 exercises with 3-4 sets each\n"
+            "- For weighted exercises include weight_kg and reps\n"
+            "- For timed exercises include duration_seconds\n"
+            "- For plyometric exercises use reps, no weight_kg needed\n\n"
+            "Return ONLY a JSON object in this exact format:\n"
+            "{\n"
+            f"  \"session_type\": \"{detected_type}\",\n"
+            "  \"new_exercises\": [\"Exercise Name 1\", \"Exercise Name 2\"],\n"
+            "  \"exercises\": [\n"
+            "    {\n"
+            "      \"title\": \"Incline Chest Press (Machine)\",\n"
+            "      \"exercise_template_id\": \"FBF92739\",\n"
+            "      \"sets\": [\n"
+            "        {\"type\": \"normal\", \"weight_kg\": 37.5, \"reps\": 8, \"duration_seconds\": null, \"distance_meters\": null, \"custom_metric\": null}\n"
+            "      ]\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "The new_exercises array should list names of any exercises not in the history library.\n"
+            "Return only the JSON, nothing else."
+        )
 
         routine_response = ai.messages.create(
             model="claude-sonnet-4-6",
@@ -923,7 +908,7 @@ Return only the JSON, nothing else."""
             raw = raw.replace("```json", "").replace("```", "").strip()
             routine_json = json.loads(raw)
 
-            session_type  = routine_json.get("session_type", detected_type or "Full Body")
+            session_type  = routine_json.get("session_type", detected_type)
             new_exercises = set(routine_json.get("new_exercises", []))
             today_str     = date.today().strftime("%d %b %Y")
             title         = f"{session_type} - {today_str}"
@@ -957,46 +942,42 @@ Return only the JSON, nothing else."""
         return "ok", 200
 
     # --- Standard chat ---
-    context = f"""You are a personal training assistant. Here is the athlete's data for the last 7 days.
-
-WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):
-{json.dumps(wellness, indent=2, default=str)}
-
-CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score, cadence, stamina:
-{json.dumps(activities, indent=2, default=str)}
-
-TRAINING PLAN (planned workouts from coach):
-{json.dumps(training, indent=2, default=str)}
-
-GYM SESSIONS:
-{json.dumps(gym_sessions, indent=2, default=str)}
-
-GYM EXERCISES (sets, reps, weights, volume per exercise):
-{json.dumps(gym_exercises, indent=2, default=str)}
-
-Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.
-IMPORTANT FORMATTING RULES — you are responding in Telegram which does not render markdown tables or headers:
-- Never use tables under any circumstances
-- Never use markdown headers (##, ###)
-- Never use bold (**text**)
-- Use simple numbered or dash lists instead
-- Keep formatting plain and conversational
-- For gym sessions use this format: "P1: Broad Jump — 3x5, P2: Pogo Jumps — 3x8" etc.
-If data is missing for a day, mention it. Give practical training advice based on recovery trends.
-Always consider the planned workout for today when giving advice.
-When asked about pace or splits, reference the per km split data directly.
-When asked about gym progress, reference weights, volume and reps trends across sessions.
-When asked about conditions, reference the weather data if available.
-execution_score is Garmin's workout compliance score (0-100).
-directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.
-Training effect aerobic scale: 0-5 where 5 is highly impacting.
-Stamina is percentage remaining at start and end of activity.
-training_readiness_score is Garmin's daily readiness out of 100.
-training_readiness_level is LOW, MODERATE or HIGH.
-acute_load is Garmin's 7-day training load — higher means more recent stress.
-recovery_time_minutes is Garmin's estimated time needed before next hard effort.
-sleep_deep_hours, sleep_rem_hours, sleep_light_hours show sleep quality breakdown.
-stress_score is average daily stress (0-100, lower is better)."""
+    context = (
+        "You are a personal training assistant. Here is the athlete's data for the last 7 days.\n\n"
+        "WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):\n"
+        f"{json.dumps(wellness, indent=2, default=str)}\n\n"
+        "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score, cadence, stamina:\n"
+        f"{json.dumps(activities, indent=2, default=str)}\n\n"
+        "TRAINING PLAN (planned workouts from coach):\n"
+        f"{json.dumps(training, indent=2, default=str)}\n\n"
+        "GYM SESSIONS:\n"
+        f"{json.dumps(gym_sessions, indent=2, default=str)}\n\n"
+        "GYM EXERCISES (sets, reps, weights, volume per exercise):\n"
+        f"{json.dumps(gym_exercises, indent=2, default=str)}\n\n"
+        "Answer the athlete's question using this data. Be concise, specific, and use the actual numbers.\n"
+        "IMPORTANT FORMATTING RULES — you are responding in Telegram which does not render markdown tables or headers:\n"
+        "- Never use tables under any circumstances\n"
+        "- Never use markdown headers (##, ###)\n"
+        "- Never use bold (**text**)\n"
+        "- Use simple numbered or dash lists instead\n"
+        "- Keep formatting plain and conversational\n"
+        "- For gym sessions use this format: P1: Broad Jump — 3x5, P2: Pogo Jumps — 3x8 etc.\n"
+        "If data is missing for a day, mention it. Give practical training advice based on recovery trends.\n"
+        "Always consider the planned workout for today when giving advice.\n"
+        "When asked about pace or splits, reference the per km split data directly.\n"
+        "When asked about gym progress, reference weights, volume and reps trends across sessions.\n"
+        "When asked about conditions, reference the weather data if available.\n"
+        "execution_score is Garmin's workout compliance score (0-100).\n"
+        "directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.\n"
+        "Training effect aerobic scale: 0-5 where 5 is highly impacting.\n"
+        "Stamina is percentage remaining at start and end of activity.\n"
+        "training_readiness_score is Garmin's daily readiness out of 100.\n"
+        "training_readiness_level is LOW, MODERATE or HIGH.\n"
+        "acute_load is Garmin's 7-day training load — higher means more recent stress.\n"
+        "recovery_time_minutes is Garmin's estimated time needed before next hard effort.\n"
+        "sleep_deep_hours, sleep_rem_hours, sleep_light_hours show sleep quality breakdown.\n"
+        "stress_score is average daily stress (0-100, lower is better)."
+    )
 
     _conversation_history.append({"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"})
 
