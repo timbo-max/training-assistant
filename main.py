@@ -293,6 +293,24 @@ def detect_session_type(user_msg):
     )
     return response.content[0].text.strip()
 
+def detect_session_date(user_msg):
+    ai = get_anthropic()
+    prompt = (
+        "Extract the intended workout date from this message. "
+        f"Today is {date.today().strftime('%A %d %b %Y')}.\n\n"
+        f"Message: \"{user_msg}\"\n\n"
+        "If the message mentions a specific day (e.g. Monday, tomorrow, next Tuesday), return that date in format DD Mon YYYY.\n"
+        "If no specific date is mentioned, return TODAY.\n"
+        "Return only the date string or TODAY, nothing else."
+    )
+    response = ai.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=15,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    result = response.content[0].text.strip()
+    return result if result != "TODAY" else date.today().strftime("%d %b %Y")
+
 SESSION_TYPE_DESCRIPTIONS = {
     "Push": "Chest, shoulders, triceps. Include pressing movements like chest press, shoulder press, dips, and tricep work. No pulling or leg movements.",
     "Pull": "Back and biceps. Include rowing movements, lat pulldowns, face pulls, curls. No pushing or leg movements.",
@@ -839,6 +857,7 @@ def telegram():
 
     if is_routine_request:
         detected_type = detect_session_type(user_msg)
+        session_date  = detect_session_date(user_msg)
 
         full_library = get_hevy_exercise_library()
         full_library_summary = [
@@ -855,7 +874,8 @@ def telegram():
 
         routine_prompt = (
             "You are a personal trainer creating a gym session routine.\n\n"
-            f"Today is {date.today().strftime('%d %b %Y')}.\n\n"
+            f"Today is {date.today().strftime('%d %b %Y')}.\n"
+            f"This session is planned for: {session_date}\n\n"
             f"{session_type_instruction}\n\n"
             "ATHLETE RECOVERY DATA (use this to calibrate intensity):\n"
             f"{json.dumps(wellness[:3] if wellness else [], indent=2, default=str)}\n\n"
@@ -910,8 +930,7 @@ def telegram():
 
             session_type  = routine_json.get("session_type", detected_type)
             new_exercises = set(routine_json.get("new_exercises", []))
-            today_str     = date.today().strftime("%d %b %Y")
-            title         = f"{session_type} - {today_str}"
+            title         = f"{session_type} - {session_date}"
 
             exercises = []
             for i, ex in enumerate(routine_json.get("exercises", [])):
