@@ -218,6 +218,29 @@ def check_hrv_alert(db, today_hrv):
         send_telegram_to_me(msg)
         print(f"HRV alert sent: {msg}")
 
+def get_hevy_exercise_library():
+    try:
+        headers = {"api-key": os.environ["HEVY_API_KEY"]}
+        all_exercises = []
+        page = 1
+        while True:
+            response = requests.get(
+                f"https://api.hevyapp.com/v1/exercise_templates?page={page}&pageSize=100",
+                headers=headers
+            )
+            data = response.json()
+            exercises = data.get("exercise_templates", [])
+            if not exercises:
+                break
+            all_exercises.extend(exercises)
+            if page >= data.get("page_count", 1):
+                break
+            page += 1
+        return all_exercises
+    except Exception as e:
+        print(f"Hevy exercise library fetch failed: {e}")
+        return []
+
 def create_hevy_routine(routine_data):
     try:
         headers = {
@@ -245,39 +268,38 @@ def create_hevy_routine(routine_data):
     except Exception as e:
         return False, str(e)
 
-def classify_session_type(exercises):
-    push_muscles = ["chest", "shoulder", "tricep", "press", "push", "dip", "fly", "pec"]
-    pull_muscles = ["row", "pull", "curl", "bicep", "lat", "back", "deadlift", "shrug"]
-    leg_muscles  = ["squat", "leg", "lunge", "calf", "glute", "hamstring", "quad", "hip"]
-
-    push_count = 0
-    pull_count = 0
-    leg_count  = 0
-
-    for ex in exercises:
-        name = ex.get("title", "").lower()
-        if any(m in name for m in push_muscles):
-            push_count += 1
-        if any(m in name for m in pull_muscles):
-            pull_count += 1
-        if any(m in name for m in leg_muscles):
-            leg_count += 1
-
-    total = push_count + pull_count + leg_count
-    if total == 0:
-        return "Full Body"
-
-    dominant = max(push_count, pull_count, leg_count)
-    if dominant == push_count and push_count > pull_count and push_count > leg_count:
-        return "Push"
-    elif dominant == pull_count and pull_count > push_count and pull_count > leg_count:
-        return "Pull"
-    elif dominant == leg_count and leg_count > push_count and leg_count > pull_count:
+def detect_session_type(user_msg):
+    msg = user_msg.lower()
+    if any(p in msg for p in ["pre run", "before my run", "before run", "pre-run"]):
+        return "Pre Run"
+    if any(p in msg for p in ["post run", "after my run", "after run", "post-run"]):
+        return "Post Run"
+    if any(p in msg for p in ["running maintenance", "run maintenance", "plyometric", "plyo"]):
+        return "Running Maintenance"
+    if any(p in msg for p in ["upper body", "upper-body"]):
+        return "Upper Body"
+    if any(p in msg for p in ["legs", "leg day", "lower body"]):
         return "Legs"
-    else:
+    if any(p in msg for p in ["push"]):
+        return "Push"
+    if any(p in msg for p in ["pull"]):
+        return "Pull"
+    if any(p in msg for p in ["full body", "full-body"]):
         return "Full Body"
+    return None
 
-def format_routine_for_telegram(routine_data):
+SESSION_TYPE_DESCRIPTIONS = {
+    "Push": "Chest, shoulders, triceps. Include pressing movements like chest press, shoulder press, dips, and tricep work. No pulling or leg movements.",
+    "Pull": "Back and biceps. Include rowing movements, lat pulldowns, face pulls, curls. No pushing or leg movements.",
+    "Legs": "Quads, hamstrings, glutes, calves. Include squats, leg press, lunges, leg curls, calf raises. No upper body.",
+    "Upper Body": "Combined push and pull. Mix of chest, shoulder, back, and arm exercises. No legs. Balanced between pushing and pulling movements.",
+    "Full Body": "Balanced mix across all muscle groups — upper push, upper pull, and legs. Good for general conditioning days.",
+    "Running Maintenance": "Full body session focused on athletic performance and running economy. Include plyometric exercises (broad jumps, pogo jumps, box jumps, bounding), explosive movements, single leg work, and hip/glute strength. Avoid heavy slow lifts that cause excessive DOMS. This session should complement running training not compromise it.",
+    "Pre Run": "Low DOMS risk session before a key running session the next day. Avoid plyometrics, heavy squats, heavy deadlifts, or anything that causes significant muscle damage. Focus on activation, light strength, and mobility-friendly movements. Keep volume moderate and avoid failure. Examples: light upper body pressing and pulling, core work, hip activation, light single leg work with minimal eccentric load.",
+    "Post Run": "Recovery-friendly strength session after a run. No plyometrics whatsoever. Focus on steady controlled strength work. Can include moderate squats, upper body pressing and pulling, core, and accessory work. Avoid explosive or high-impact movements. Weights should be moderate — not a PR day.",
+}
+
+def format_routine_for_telegram(routine_data, new_exercises=None):
     lines = [f"Suggested session: {routine_data['title']}", ""]
     for i, ex in enumerate(routine_data["exercises"]):
         sets = ex.get("sets", [])
@@ -290,7 +312,15 @@ def format_routine_for_telegram(routine_data):
             elif s.get("reps"):
                 set_lines.append(f"{s['reps']} reps")
         sets_str = ", ".join(set_lines)
-        lines.append(f"{i+1}. {ex['title']} — {sets_str}")
+        name = ex.get("title", "")
+        is_new = new_exercises and name in new_exercises
+        marker = " *" if is_new else ""
+        lines.append(f"{i+1}. {name}{marker} — {sets_str}")
+
+    if new_exercises:
+        lines.append("")
+        lines.append("* New exercise — adjust weight in Hevy before starting if needed.")
+
     lines.append("")
     lines.append("Reply 'yes' to create this routine in Hevy, or 'no' to cancel.")
     return "\n".join(lines)
@@ -520,7 +550,7 @@ def sync_day(garmin, db, d):
 def sync_garmin():
     db     = get_supabase()
     garmin = get_garmin()
-    since = datetime.now() - timedelta(hours=24)
+    since  = datetime.now() - timedelta(hours=24)
     sync_day(garmin, db, since.date().isoformat())
     print(f"Garmin sync complete for {since.date().isoformat()}")
 
@@ -735,11 +765,12 @@ def telegram():
     if user_msg.lower() in ["/sync", "/sync today"]:
         try:
             garmin = get_garmin()
-            today  = date.today().isoformat()
-            sync_day(garmin, db, today)
+            since  = datetime.now() - timedelta(hours=24)
+            d      = since.date().isoformat()
+            sync_day(garmin, db, d)
             sync_trainingpeaks()
-            sync_hevy(db, target_date=date.today())
-            send_telegram(chat_id, f"Sync complete for {today}!")
+            sync_hevy(db, target_date=since.date())
+            send_telegram(chat_id, f"Sync complete for {d}!")
         except Exception as e:
             send_telegram(chat_id, f"Sync failed: {e}")
         return "ok", 200
@@ -760,13 +791,16 @@ def telegram():
     if user_msg.lower() == "/help":
         help_text = (
             "Available commands:\n\n"
-            "/sync — sync today's data\n"
+            "/sync — sync the last 24 hours of data\n"
             "/sync YYYY-MM-DD — sync a specific date e.g. /sync 2026-04-15\n"
             "/clear — clear conversation history\n"
             "/help — show this message\n\n"
-            "Or just ask me anything about your training!\n\n"
-            "To get a gym session suggestion, just ask:\n"
-            "'Suggest a gym session for today'"
+            "Gym session types you can request:\n"
+            "- Push, Pull, Legs, Upper Body, Full Body\n"
+            "- Running Maintenance (plyometrics + explosive work)\n"
+            "- Pre Run (low DOMS risk, activation focus)\n"
+            "- Post Run (no plyometrics, steady strength)\n\n"
+            "Or just ask me anything about your training!"
         )
         send_telegram(chat_id, help_text)
         return "ok", 200
@@ -779,28 +813,56 @@ def telegram():
     gym_sessions  = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
-    # Build exercise library from full history
+    # Build exercise history library
     all_exercises = db.table("gym_exercises").select(
         "exercise_name, exercise_template_id, max_weight_kg, total_reps, sets"
     ).order("date", desc=True).execute().data
 
-    # Deduplicate by template ID keeping most recent
     seen = {}
     for ex in all_exercises:
         tid = ex.get("exercise_template_id")
         if tid and tid not in seen:
             seen[tid] = ex
-    exercise_library = list(seen.values())
+    exercise_history = list(seen.values())
+    history_template_ids = set(seen.keys())
 
     is_routine_request = any(phrase in user_msg.lower() for phrase in [
         "suggest a gym", "gym session", "suggest a session", "create a routine",
-        "make a routine", "plan a workout", "suggest a workout", "gym workout"
+        "make a routine", "plan a workout", "suggest a workout", "gym workout",
+        "pre run", "post run", "running maintenance", "upper body", "leg day",
+        "push session", "pull session", "full body session"
     ])
 
     if is_routine_request:
+        detected_type = detect_session_type(user_msg)
+
+        # Fetch full Hevy exercise library for new exercise suggestions
+        full_library = get_hevy_exercise_library()
+        full_library_summary = [
+            {"title": e.get("title"), "exercise_template_id": e.get("id")}
+            for e in full_library
+            if e.get("title") and e.get("id")
+        ]
+
+        session_type_instruction = ""
+        if detected_type:
+            session_type_instruction = f"""
+SESSION TYPE REQUESTED: {detected_type}
+{SESSION_TYPE_DESCRIPTIONS.get(detected_type, "")}
+You MUST classify this session as "{detected_type}" in your response.
+"""
+        else:
+            types_list = "\n".join([f"- {k}: {v}" for k, v in SESSION_TYPE_DESCRIPTIONS.items()])
+            session_type_instruction = f"""
+No specific session type was requested. Choose the most appropriate type based on the athlete's recovery data and recent training history. Available types:
+{types_list}
+"""
+
         routine_prompt = f"""You are a personal trainer creating a gym session routine.
 
 Today is {date.today().strftime('%d %b %Y')}.
+
+{session_type_instruction}
 
 ATHLETE RECOVERY DATA (use this to calibrate intensity):
 {json.dumps(wellness[:3] if wellness else [], indent=2, default=str)}
@@ -808,26 +870,32 @@ ATHLETE RECOVERY DATA (use this to calibrate intensity):
 RECENT GYM SESSIONS (avoid repeating same exercises too soon):
 {json.dumps(gym_sessions[:5] if gym_sessions else [], indent=2, default=str)}
 
-RECENT GYM EXERCISES WITH WEIGHTS:
+RECENT GYM EXERCISES WITH WEIGHTS (prefer these as they have weight history):
 {json.dumps(gym_exercises[:30] if gym_exercises else [], indent=2, default=str)}
 
-AVAILABLE EXERCISE LIBRARY (ONLY use exercises from this list — you must use the exact exercise_template_id):
-{json.dumps(exercise_library, indent=2, default=str)}
+EXERCISE HISTORY LIBRARY (exercises done before with known weights):
+{json.dumps(exercise_history, indent=2, default=str)}
 
-Create a balanced gym session. Rules:
-- ONLY use exercises from the AVAILABLE EXERCISE LIBRARY above
-- Use the exact exercise_template_id from the library for each exercise
-- Base weights on recent performance — progress by 2.5-5kg if last session felt strong, maintain if moderate, reduce if recovery is poor
+FULL HEVY EXERCISE LIBRARY (you may also use these if appropriate for the session type — use exact exercise_template_id):
+{json.dumps(full_library_summary, indent=2, default=str)}
+
+Rules:
+- Prefer exercises from the history library where possible as weights are known
+- You MAY use exercises from the full library if they suit the session type better
+- For exercises not in history, suggest a conservative starting weight and flag them
+- Use the exact exercise_template_id from whichever library the exercise comes from
+- Base weights on recent performance — progress by 2.5-5kg if last session felt strong
 - Consider today's recovery: HRV, readiness score, body battery, stress
 - Avoid exercises done in the last 48 hours if possible
-- Classify the session as Push, Pull, Legs, or Full Body based on the exercises chosen
 - Include 6-10 exercises with 3-4 sets each
 - For weighted exercises include weight_kg and reps
 - For timed exercises include duration_seconds
+- For plyometric exercises use reps, no weight_kg needed
 
 Return ONLY a JSON object in this exact format:
 {{
-  "session_type": "Push",
+  "session_type": "{detected_type or 'Full Body'}",
+  "new_exercises": ["Exercise Name 1", "Exercise Name 2"],
   "exercises": [
     {{
       "title": "Incline Chest Press (Machine)",
@@ -841,6 +909,7 @@ Return ONLY a JSON object in this exact format:
   ]
 }}
 
+The "new_exercises" array should list the names of any exercises not in the history library so they can be flagged to the user.
 Return only the JSON, nothing else."""
 
         routine_response = ai.messages.create(
@@ -854,9 +923,10 @@ Return only the JSON, nothing else."""
             raw = raw.replace("```json", "").replace("```", "").strip()
             routine_json = json.loads(raw)
 
-            session_type = routine_json.get("session_type", "Full Body")
-            today_str    = date.today().strftime("%d %b %Y")
-            title        = f"{session_type} - {today_str}"
+            session_type  = routine_json.get("session_type", detected_type or "Full Body")
+            new_exercises = set(routine_json.get("new_exercises", []))
+            today_str     = date.today().strftime("%d %b %Y")
+            title         = f"{session_type} - {today_str}"
 
             exercises = []
             for i, ex in enumerate(routine_json.get("exercises", [])):
@@ -876,7 +946,7 @@ Return only the JSON, nothing else."""
                 "exercises": exercises,
             }
 
-            reply = format_routine_for_telegram(_pending_routine)
+            reply = format_routine_for_telegram(_pending_routine, new_exercises if new_exercises else None)
 
         except Exception as e:
             print(f"Routine generation failed: {e}")
