@@ -940,7 +940,6 @@ def telegram():
                     "notes":                None,
                     "exercise_template_id": ex.get("exercise_template_id"),
                     "superset_id":          None,
-                    "rest_seconds":         90,
                     "sets":                 ex.get("sets", []),
                 })
 
