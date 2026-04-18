@@ -23,7 +23,7 @@ A personal AI-powered training assistant that automatically syncs data from Garm
 Garmin Fenix → Garmin Connect → Railway backend → Supabase
 Hevy app → Hevy API → Railway backend → Supabase
 TrainingPeaks → iCal feed → Railway backend → Supabase
-cron-job.org → /sync (6am daily) → Railway → Supabase
+cron-job.org → /sync (7:30am daily) → Railway → Supabase
 cron-job.org → /weekly-summary (Sunday 6pm) → Telegram
 Telegram message → Railway /telegram → Claude AI → Supabase → Telegram reply
 Telegram "suggest gym session" → Claude AI → Hevy API (creates routine)
@@ -60,7 +60,7 @@ Telegram "suggest gym session" → Claude AI → Hevy API (creates routine)
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/sync` | GET | Pulls yesterday's Garmin data + TrainingPeaks + recent Hevy sessions |
+| `/sync` | GET | Pulls last 24 hours of Garmin data + TrainingPeaks + recent Hevy sessions |
 | `/sync-date?date=YYYY-MM-DD` | GET | Syncs a specific date |
 | `/weekly-summary` | GET | Generates and sends weekly summary to Telegram |
 | `/backfill` | GET | Imports last 90 days of Garmin activities |
@@ -75,7 +75,7 @@ All endpoints except `/telegram` require `?token=YOUR_SYNC_SECRET`.
 
 | Command / phrase | Description |
 |---|---|
-| `/sync` | Syncs today's data immediately |
+| `/sync` | Syncs the last 24 hours of data immediately |
 | `/sync YYYY-MM-DD` | Syncs a specific date e.g. `/sync 2026-04-15` |
 | `/clear` | Clears conversation history for a fresh start |
 | `/help` | Shows available commands |
@@ -112,6 +112,7 @@ Set these in Railway:
 | `TRAININGPEAKS_ICAL_URL` | TrainingPeaks calendar iCal URL (use https:// not webcal://) |
 | `HEVY_API_KEY` | Hevy API key from hevy.com/settings?developer (PRO required) |
 | `SYNC_SECRET` | Any random string used to protect sync endpoints |
+| `TZ` | Your local timezone e.g. Australia/Sydney |
 
 ---
 
@@ -233,7 +234,7 @@ alter table gym_exercises enable row level security;
 
 1. Fork or clone this repo to your GitHub account
 2. Create a new Railway project → Deploy from GitHub repo
-3. Add all environment variables listed above
+3. Add all environment variables listed above including `TZ` for your local timezone
 4. Railway will auto-deploy on every push to GitHub
 5. Generate a public domain in Railway → Settings → Networking
 
@@ -252,7 +253,7 @@ https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-railway-url
 
 Create two jobs at [cron-job.org](https://cron-job.org):
 
-**Daily sync** — every day at 6:00 AM in your timezone:
+**Daily sync** — every day at 7:30am in your timezone:
 ```
 https://your-railway-url.up.railway.app/sync?token=YOUR_SYNC_SECRET
 ```
@@ -271,13 +272,24 @@ https://your-railway-url.up.railway.app/backfill?token=YOUR_SYNC_SECRET
 
 ---
 
+## How sync works
+
+The `/sync` endpoint always pulls the **last 24 hours** of data rather than a fixed yesterday date. This means:
+
+- The 7:30am cron job captures overnight sleep and any previous day activities
+- The Telegram `/sync` command captures whatever happened in the last 24 hours regardless of time of day
+- All times are calculated in your local timezone via the `TZ` environment variable
+
+---
+
 ## Daily flow
 
 **Cardio:**
 1. Finish a session on your Garmin Fenix
-2. At 6am the next morning the cron job pulls all data automatically
-3. Wellness, activities, splits, weather, compliance score land in Supabase
-4. Open Telegram and ask your bot about the session — or type `/sync` for an immediate sync
+2. At 7:30am the next morning the cron job pulls all data automatically
+3. Or type `/sync` in Telegram anytime for an immediate update
+4. Wellness, activities, splits, weather, compliance score land in Supabase
+5. Ask your bot about the session
 
 **Gym:**
 1. Ask the bot "suggest a gym session for today"
@@ -335,4 +347,4 @@ icalendar
 
 ## Notes on Garmin rate limiting
 
-The Garmin Connect unofficial API rate limits login attempts. If you see 429 errors in Railway logs, wait 2-3 hours before trying again. In normal daily use the single 6am sync is well within limits. Avoid hitting `/sync` or `/backfill` repeatedly in a short period.
+The Garmin Connect unofficial API rate limits login attempts. If you see 429 errors in Railway logs, wait 2-3 hours before trying again. In normal daily use the single 7:30am sync is well within limits. Avoid hitting `/sync` or `/backfill` repeatedly in a short period.
