@@ -108,19 +108,7 @@ def extract_activity_details(garmin, activity_id):
         if avg_speed and avg_speed > 0:
             pace_sec = 1000 / avg_speed
             avg_pace = round(pace_sec / 60, 2)
-
-        execution_score = None
-        try:
-            iq = details.get("connectIQMeasurements", [])
-            if iq:
-                execution_score = float(iq[0].get("value", 0))
-        except Exception:
-            pass
-
-        direct_compliance = summary.get("directWorkoutComplianceScore")
-        if direct_compliance is not None:
-            execution_score = float(direct_compliance)
-
+            
         perceived_effort = summary.get("directWorkoutRpe") or summary.get("perceivedExertion")
 
         return {
@@ -131,7 +119,6 @@ def extract_activity_details(garmin, activity_id):
             "training_effect_anaerobic": summary.get("anaerobicTrainingEffect"),
             "exercise_load":             summary.get("activityTrainingLoad"),
             "body_battery_impact":       summary.get("differenceBodyBattery"),
-            "execution_score":           execution_score,
             "perceived_effort":          perceived_effort,
             "stamina_start":             summary.get("beginPotentialStamina"),
             "stamina_end":               summary.get("endPotentialStamina"),
@@ -159,7 +146,6 @@ def score_compliance(planned, actual_activities):
         "training_effect_aerobic":   a.get("training_effect_aerobic"),
         "training_effect_anaerobic": a.get("training_effect_anaerobic"),
         "exercise_load":             a.get("exercise_load"),
-        "execution_score":           a.get("execution_score"),
         "perceived_effort":          a.get("perceived_effort"),
         "stamina_start":             a.get("stamina_start"),
         "stamina_end":               a.get("stamina_end"),
@@ -528,7 +514,6 @@ def sync_day(garmin, db, d):
                 "training_effect_anaerobic": details.get("training_effect_anaerobic"),
                 "exercise_load":             details.get("exercise_load"),
                 "body_battery_impact":       details.get("body_battery_impact"),
-                "execution_score":           details.get("execution_score"),
                 "perceived_effort":          details.get("perceived_effort"),
                 "stamina_start":             details.get("stamina_start"),
                 "stamina_end":               details.get("stamina_end"),
@@ -720,7 +705,6 @@ def backfill():
                     "training_effect_anaerobic": details.get("training_effect_anaerobic"),
                     "exercise_load":             details.get("exercise_load"),
                     "body_battery_impact":       details.get("body_battery_impact"),
-                    "execution_score":           details.get("execution_score"),
                     "perceived_effort":          details.get("perceived_effort"),
                     "stamina_start":             details.get("stamina_start"),
                     "stamina_end":               details.get("stamina_end"),
