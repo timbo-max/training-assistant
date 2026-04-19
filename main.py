@@ -562,6 +562,12 @@ def sync_trainingpeaks():
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
 
+    # Clear planned workouts in the sync window before re-adding
+    # This handles cases where sessions were moved or deleted in TrainingPeaks
+    db.table("training_load").update({
+        "planned_workout": None,
+    }).gte("date", window_start.isoformat()).lte("date", window_end.isoformat()).execute()
+
     sessions_by_date = {}
     for component in cal.walk():
         if component.name != "VEVENT":
