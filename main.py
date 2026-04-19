@@ -563,10 +563,31 @@ def sync_trainingpeaks():
     window_end   = today + timedelta(days=7)
 
     # Clear planned workouts in the sync window before re-adding
-    # This handles cases where sessions were moved or deleted in TrainingPeaks
-    db.table("training_load").update({
-        "planned_workout": None,
-    }).gte("date", window_start.isoformat()).lte("date", window_end.isoformat()).execute()
+    # Get all dates that should be in the new sync
+    valid_dates = set()
+    for component in cal.walk():
+        if component.name != "VEVENT":
+            continue
+        dtstart = component.get("DTSTART")
+        if not dtstart:
+            continue
+        event_date = dtstart.dt
+        if hasattr(event_date, "date"):
+            event_date = event_date.date()
+        if window_start <= event_date <= window_end:
+            valid_dates.add(event_date.isoformat())
+
+    # Find dates in DB window that are NOT in current iCal — clear those
+    existing = db.table("training_load").select("date, planned_workout").gte(
+        "date", window_start.isoformat()
+    ).lte("date", window_end.isoformat()).execute().data
+
+    for row in existing:
+        if row["date"] not in valid_dates and row.get("planned_workout"):
+            db.table("training_load").update({
+                "planned_workout": None,
+            }).eq("date", row["date"]).execute()
+            print(f"Cleared moved/deleted session from {row['date']}")
 
     sessions_by_date = {}
     for component in cal.walk():
@@ -944,7 +965,8 @@ def telegram():
 
     # --- Standard chat ---
     context = (
-        "You are a personal training assistant. Here is the athlete's data for the last 7 days.\n\n"
+        f"You are a personal training assistant. Today is {date.today().strftime('%A %d %B %Y')}.\n"
+        "Here is the athlete's data for the last 7 days.\n\n"
         "WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, acute load):\n"
         f"{json.dumps(wellness, indent=2, default=str)}\n\n"
         "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, cadence, stamina:\n"
