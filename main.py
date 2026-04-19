@@ -573,9 +573,11 @@ def sync_day(garmin, db, d):
 def sync_garmin():
     db     = get_supabase()
     garmin = get_garmin()
-    since  = datetime.now() - timedelta(hours=24)
-    sync_day(garmin, db, since.date().isoformat())
-    print(f"Garmin sync complete for {since.date().isoformat()}")
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today     = date.today().isoformat()
+    sync_day(garmin, db, yesterday)
+    sync_day(garmin, db, today)
+    print(f"Garmin sync complete for {yesterday} and {today}")
 
 def sync_trainingpeaks():
     db       = get_supabase()
@@ -788,12 +790,13 @@ def telegram():
     if user_msg.lower() in ["/sync", "/sync today"]:
         try:
             garmin = get_garmin()
-            since  = datetime.now() - timedelta(hours=24)
-            d      = since.date().isoformat()
-            sync_day(garmin, db, d)
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            today     = date.today().isoformat()
+            sync_day(garmin, db, yesterday)
+            sync_day(garmin, db, today)
             sync_trainingpeaks()
-            sync_hevy(db, target_date=since.date())
-            send_telegram(chat_id, f"Sync complete for {d}!")
+            sync_hevy(db, target_date=date.today())
+            send_telegram(chat_id, f"Sync complete for {yesterday} and {today}!")
         except Exception as e:
             send_telegram(chat_id, f"Sync failed: {e}")
         return "ok", 200
