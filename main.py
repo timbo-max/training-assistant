@@ -991,7 +991,7 @@ def telegram():
         "directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.\n"
         "Training effect aerobic scale: 0-5 where 5 is highly impacting.\n"
         "Stamina is percentage remaining at start and end of activity.\n"
-        "training_readiness_score is Garmin's daily readiness out of 100.\n"
+        "training_readiness_score is Garmin's readiness out of 100 at the time of last sync. NOTE: this updates dynamically throughout the day based on activities, so if synced after a hard session the score reflects post-session fatigue, not the pre-session readiness. When discussing readiness for a completed session, acknowledge this and interpret accordingly.\n"
         "training_readiness_level is LOW, MODERATE or HIGH.\n"
         "acute_load is Garmin's 7-day training load — higher means more recent stress.\n"
         "recovery_time_minutes is Garmin's estimated time needed before next hard effort.\n"
