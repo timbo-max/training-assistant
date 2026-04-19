@@ -582,8 +582,11 @@ def sync_trainingpeaks():
         "date", window_start.isoformat()
     ).lte("date", window_end.isoformat()).execute().data
 
+   today_iso = date.today().isoformat()
     for row in existing:
-        if row["date"] not in valid_dates and row.get("planned_workout"):
+        # Only clear FUTURE dates that are no longer in iCal
+        # Past dates keep their planned workouts for compliance scoring
+        if row["date"] >= today_iso and row["date"] not in valid_dates and row.get("planned_workout"):
             db.table("training_load").update({
                 "planned_workout": None,
             }).eq("date", row["date"]).execute()
