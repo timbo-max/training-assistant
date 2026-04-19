@@ -183,7 +183,6 @@ Compare the planned vs actual workout. Consider:
 - Whether interval structure was completed
 - Heart rate data as evidence of effort zones
 - Training effect as evidence of intensity achieved
-- Execution score from Garmin if available (0-100)
 - Perceived effort (directWorkoutRpe is 0-100 scale, 70 = 7/10)
 - Stamina data
 
@@ -968,7 +967,7 @@ def telegram():
         "You are a personal training assistant. Here is the athlete's data for the last 7 days.\n\n"
         "WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):\n"
         f"{json.dumps(wellness, indent=2, default=str)}\n\n"
-        "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, execution score, cadence, stamina:\n"
+        "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, cadence, stamina:\n"
         f"{json.dumps(activities, indent=2, default=str)}\n\n"
         "TRAINING PLAN (planned workouts from coach):\n"
         f"{json.dumps(training, indent=2, default=str)}\n\n"
@@ -989,7 +988,6 @@ def telegram():
         "When asked about pace or splits, reference the per km split data directly.\n"
         "When asked about gym progress, reference weights, volume and reps trends across sessions.\n"
         "When asked about conditions, reference the weather data if available.\n"
-        "execution_score is Garmin's workout compliance score (0-100).\n"
         "directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.\n"
         "Training effect aerobic scale: 0-5 where 5 is highly impacting.\n"
         "Stamina is percentage remaining at start and end of activity.\n"
