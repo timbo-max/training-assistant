@@ -459,18 +459,11 @@ def sync_day(garmin, db, d):
         except Exception:
             pass
 
-        readiness_score = None
-        readiness_level = None
-        acute_load      = None
-        recovery_time   = None
+        acute_load = None
         try:
             readiness = garmin.get_training_readiness(d)
             if readiness:
-                latest = readiness[0]
-                readiness_score = latest.get("score")
-                readiness_level = latest.get("level")
-                acute_load      = latest.get("acuteLoad")
-                recovery_time   = latest.get("recoveryTime")
+                acute_load = readiness[0].get("acuteLoad")
         except Exception:
             pass
 
@@ -493,9 +486,6 @@ def sync_day(garmin, db, d):
             "spo2":                       stats.get("averageSpo2"),
             "respiration_rate":           stats.get("avgWakingRespirationValue"),
             "acute_load":                 acute_load,
-            "training_readiness_score":   readiness_score,
-            "training_readiness_level":   readiness_level,
-            "recovery_time_minutes":      recovery_time,
         }, on_conflict="date").execute()
 
         today_hrv = hrv_value
@@ -663,8 +653,8 @@ def weekly_summary():
 Structure it as:
 1. Week overview (2 sentences)
 2. Training load (sessions completed, total distance, total time, gym sessions, acute load trend)
-3. Recovery trends (HRV, sleep stages, Body Battery, stress score, training readiness)
-4. Compliance (how well planned vs actual matched, reference execution scores)
+3. Recovery trends (HRV, sleep stages, Body Battery, stress score)
+4. Compliance (how well planned vs actual matched)
 5. One key insight or recommendation for next week
 
 WELLNESS DATA:
@@ -895,7 +885,7 @@ def telegram():
             "- For exercises not in history, suggest a conservative starting weight and flag them\n"
             "- Use the exact exercise_template_id from whichever library the exercise comes from\n"
             "- Base weights on recent performance — progress by 2.5-5kg if last session felt strong\n"
-            "- Consider today's recovery: HRV, readiness score, body battery, stress\n"
+            "- Consider today's recovery: HRV, body battery, stress, acute load\n"
             "- Avoid exercises done in the last 48 hours if possible\n"
             "- Include 6-10 exercises with 3-4 sets each\n"
             "- For weighted exercises use 6-8 reps unless the exercise is better suited to higher reps (e.g. calf raises, face pulls, core work)\n"
@@ -965,7 +955,7 @@ def telegram():
     # --- Standard chat ---
     context = (
         "You are a personal training assistant. Here is the athlete's data for the last 7 days.\n\n"
-        "WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, training readiness, acute load):\n"
+        "WELLNESS (HRV, sleep stages, Body Battery, resting HR, stress, steps, acute load):\n"
         f"{json.dumps(wellness, indent=2, default=str)}\n\n"
         "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, cadence, stamina:\n"
         f"{json.dumps(activities, indent=2, default=str)}\n\n"
@@ -991,10 +981,7 @@ def telegram():
         "directWorkoutRpe / perceived_effort is on a 0-100 scale where 70 = 7/10 effort.\n"
         "Training effect aerobic scale: 0-5 where 5 is highly impacting.\n"
         "Stamina is percentage remaining at start and end of activity.\n"
-        "training_readiness_score is Garmin's readiness out of 100 at the time of last sync. NOTE: this updates dynamically throughout the day based on activities, so if synced after a hard session the score reflects post-session fatigue, not the pre-session readiness. When discussing readiness for a completed session, acknowledge this and interpret accordingly.\n"
-        "training_readiness_level is LOW, MODERATE or HIGH.\n"
         "acute_load is Garmin's 7-day training load — higher means more recent stress.\n"
-        "recovery_time_minutes is Garmin's estimated time needed before next hard effort.\n"
         "sleep_deep_hours, sleep_rem_hours, sleep_light_hours show sleep quality breakdown.\n"
         "stress_score is average daily stress (0-100, lower is better)."
     )
