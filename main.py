@@ -108,7 +108,7 @@ def extract_activity_details(garmin, activity_id):
         if avg_speed and avg_speed > 0:
             pace_sec = 1000 / avg_speed
             avg_pace = round(pace_sec / 60, 2)
-            
+
         perceived_effort = summary.get("directWorkoutRpe") or summary.get("perceivedExertion")
 
         return {
@@ -562,8 +562,7 @@ def sync_trainingpeaks():
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
 
-    # Clear planned workouts in the sync window before re-adding
-    # Get all dates that should be in the new sync
+    # Get all dates currently in iCal within the sync window
     valid_dates = set()
     for component in cal.walk():
         if component.name != "VEVENT":
@@ -577,12 +576,12 @@ def sync_trainingpeaks():
         if window_start <= event_date <= window_end:
             valid_dates.add(event_date.isoformat())
 
-    # Find dates in DB window that are NOT in current iCal — clear those
+    # Find dates in DB window that are NOT in current iCal — clear future ones only
     existing = db.table("training_load").select("date, planned_workout").gte(
         "date", window_start.isoformat()
     ).lte("date", window_end.isoformat()).execute().data
 
-   today_iso = date.today().isoformat()
+    today_iso = date.today().isoformat()
     for row in existing:
         # Only clear FUTURE dates that are no longer in iCal
         # Past dates keep their planned workouts for compliance scoring
@@ -974,7 +973,7 @@ def telegram():
         f"{json.dumps(wellness, indent=2, default=str)}\n\n"
         "CARDIO ACTIVITIES (runs, rides, etc.) including splits, weather, training effect, cadence, stamina:\n"
         f"{json.dumps(activities, indent=2, default=str)}\n\n"
-        "TRAINING PLAN (planned workouts from coach):\n"
+        "TRAINING PLAN (planned workouts from coach — only reference dates that have actual data, do not invent or assume sessions for empty dates):\n"
         f"{json.dumps(training, indent=2, default=str)}\n\n"
         "GYM SESSIONS:\n"
         f"{json.dumps(gym_sessions, indent=2, default=str)}\n\n"
