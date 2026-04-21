@@ -50,6 +50,24 @@ def check_sync_auth():
     token = request.args.get("token") or request.headers.get("X-Sync-Token")
     return token == os.environ.get("SYNC_SECRET")
 
+def claude_haiku(prompt):
+    ai = get_anthropic()
+    response = ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=50,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text.strip()
+
+def claude_sonnet(messages, max_tokens=800):
+    ai = get_anthropic()
+    response = ai.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        messages=messages
+    )
+    return response
+
 def extract_splits(garmin, activity_id):
     try:
         splits = garmin.get_activity_splits(activity_id)
@@ -132,7 +150,6 @@ def extract_activity_details(garmin, activity_id):
 def score_compliance(planned, actual_activities):
     if not planned or not actual_activities:
         return None, None
-    ai = get_anthropic()
     actual_summary = json.dumps([{
         "name":                      a.get("name"),
         "sport_type":                a.get("sport_type"),
@@ -142,9 +159,7 @@ def score_compliance(planned, actual_activities):
         "avg_hr":                    a.get("avg_hr"),
         "max_hr":                    a.get("max_hr"),
         "avg_pace_min_km":           a.get("avg_pace_min_km"),
-        "avg_cadence":               a.get("avg_cadence"),
         "training_effect_aerobic":   a.get("training_effect_aerobic"),
-        "training_effect_anaerobic": a.get("training_effect_anaerobic"),
         "exercise_load":             a.get("exercise_load"),
         "perceived_effort":          a.get("perceived_effort"),
         "stamina_start":             a.get("stamina_start"),
@@ -152,34 +167,23 @@ def score_compliance(planned, actual_activities):
         "splits":                    a.get("splits"),
     } for a in actual_activities], default=str)
 
+    prompt = (
+        "You are a running coach analysing workout compliance.\n\n"
+        f"PLANNED WORKOUT:\n{planned}\n\n"
+        f"ACTUAL WORKOUT DATA:\n{actual_summary}\n\n"
+        "Compare planned vs actual. Consider duration, distance, pace zones, interval structure, HR, training effect, perceived effort, stamina.\n\n"
+        "Return ONLY a JSON object:\n"
+        "{\"score\": <integer 0-100>, \"notes\": \"<two sentences: what matched and what didn't>\"}\n\n"
+        "100 = perfect compliance, 0 = completely missed. Return only the JSON, nothing else."
+    )
+    ai = get_anthropic()
     response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        messages=[{"role": "user", "content": f"""You are a running coach analysing workout compliance.
-
-PLANNED WORKOUT:
-{planned}
-
-ACTUAL WORKOUT DATA:
-{actual_summary}
-
-Compare the planned vs actual workout. Consider:
-- Total duration and distance vs planned
-- Pace achieved vs target pace zones
-- Whether interval structure was completed
-- Heart rate data as evidence of effort zones
-- Training effect as evidence of intensity achieved
-- Perceived effort (directWorkoutRpe is 0-100 scale, 70 = 7/10)
-- Stamina data
-
-Return ONLY a JSON object:
-{{"score": <integer 0-100>, "notes": "<two sentences: what matched and what didn't>"}}
-
-100 = perfect compliance, 0 = completely missed session.
-Return only the JSON, nothing else."""}]
+        model="claude-haiku-4-5-20251001",
+        max_tokens=150,
+        messages=[{"role": "user", "content": prompt}]
     )
     try:
-        result = json.loads(response.content[0].text)
+        result = json.loads(response.content[0].text.strip())
         return result.get("score"), result.get("notes")
     except Exception:
         return None, None
@@ -226,6 +230,31 @@ def get_hevy_exercise_library():
         print(f"Hevy exercise library fetch failed: {e}")
         return []
 
+def refresh_hevy_cache(db):
+    try:
+        exercises = get_hevy_exercise_library()
+        for ex in exercises:
+            db.table("hevy_exercise_cache").upsert({
+                "exercise_template_id": ex.get("id"),
+                "title":                ex.get("title"),
+                "synced_at":            datetime.now().isoformat(),
+            }, on_conflict="exercise_template_id").execute()
+        print(f"Hevy cache refreshed — {len(exercises)} exercises stored")
+        return len(exercises)
+    except Exception as e:
+        print(f"Hevy cache refresh failed: {e}")
+        return 0
+
+def get_cached_exercise_library(db):
+    try:
+        rows = db.table("hevy_exercise_cache").select(
+            "exercise_template_id, title"
+        ).order("title").execute().data
+        return [{"title": r["title"], "exercise_template_id": r["exercise_template_id"]} for r in rows]
+    except Exception as e:
+        print(f"Hevy cache read failed: {e}")
+        return []
+
 def create_hevy_routine(routine_data):
     try:
         headers = {
@@ -254,7 +283,6 @@ def create_hevy_routine(routine_data):
         return False, str(e)
 
 def detect_session_type(user_msg):
-    ai = get_anthropic()
     prompt = (
         "Based on this gym session request, identify the session type.\n"
         "Return ONLY one of these exact values: Push, Pull, Legs, Upper Body, Full Body, Running Maintenance, Pre Run, Post Run\n\n"
@@ -271,15 +299,9 @@ def detect_session_type(user_msg):
         "- If unclear default to Full Body\n\n"
         "Return only the session type, nothing else."
     )
-    response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=10,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.content[0].text.strip()
+    return claude_haiku(prompt)
 
 def detect_session_date(user_msg):
-    ai = get_anthropic()
     prompt = (
         "Extract the intended workout date from this message. "
         f"Today is {date.today().strftime('%A %d %b %Y')}.\n\n"
@@ -288,12 +310,7 @@ def detect_session_date(user_msg):
         "If no specific date is mentioned, return TODAY.\n"
         "Return only the date string or TODAY, nothing else."
     )
-    response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=15,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    result = response.content[0].text.strip()
+    result = claude_haiku(prompt)
     return result if result != "TODAY" else date.today().strftime("%d %b %Y")
 
 SESSION_TYPE_DESCRIPTIONS = {
@@ -332,6 +349,156 @@ def format_routine_for_telegram(routine_data, new_exercises=None):
     lines.append("")
     lines.append("Reply 'yes' to create this routine in Hevy, or 'no' to cancel.")
     return "\n".join(lines)
+
+def build_stats(db):
+    try:
+        week_ago   = (date.today() - timedelta(days=7)).isoformat()
+        activities = db.table("activities").select("*").gte("date", week_ago).execute().data
+        wellness   = db.table("daily_wellness").select("date, acute_load, hrv_rmssd").gte("date", week_ago).order("date", desc=True).execute().data
+        gym        = db.table("gym_sessions").select("*").gte("date", week_ago).execute().data
+        gym_ex     = db.table("gym_exercises").select("total_volume_kg").gte("date", week_ago).execute().data
+
+        runs   = [a for a in activities if a.get("sport_type") in ["running", "trail_running"]]
+        rides  = [a for a in activities if a.get("sport_type") in ["cycling", "road_biking"]]
+
+        total_run_km  = round(sum(a.get("distance_km") or 0 for a in runs), 1)
+        total_run_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in runs)
+        total_run_hrs = f"{int(total_run_sec // 3600)}h {int((total_run_sec % 3600) // 60)}m"
+
+        total_ride_km  = round(sum(a.get("distance_km") or 0 for a in rides), 1)
+        total_ride_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in rides)
+        total_ride_hrs = f"{int(total_ride_sec // 3600)}h {int((total_ride_sec % 3600) // 60)}m"
+
+        total_gym_vol = round(sum(e.get("total_volume_kg") or 0 for e in gym_ex), 0)
+
+        acute_loads = [w["acute_load"] for w in wellness if w.get("acute_load")]
+        current_load = acute_loads[0] if acute_loads else None
+        avg_load     = round(sum(acute_loads) / len(acute_loads), 0) if acute_loads else None
+
+        hrv_values = [w["hrv_rmssd"] for w in wellness if w.get("hrv_rmssd")]
+        avg_hrv    = round(sum(hrv_values) / len(hrv_values), 0) if hrv_values else None
+        latest_hrv = hrv_values[0] if hrv_values else None
+
+        lines = [f"Training stats — last 7 days ({date.today().strftime('%d %b')})", ""]
+
+        if runs:
+            lines.append(f"Running: {len(runs)} sessions, {total_run_km}km, {total_run_hrs}")
+        if rides:
+            lines.append(f"Riding: {len(rides)} sessions, {total_ride_km}km, {total_ride_hrs}")
+        if gym:
+            lines.append(f"Gym: {len(gym)} sessions, {total_gym_vol:.0f}kg total volume")
+        if not runs and not rides and not gym:
+            lines.append("No sessions recorded this week.")
+
+        lines.append("")
+        if current_load and avg_load:
+            trend = "up" if current_load > avg_load else "down"
+            lines.append(f"Acute load: {current_load:.0f} (7-day avg {avg_load:.0f}, trending {trend})")
+        if latest_hrv and avg_hrv:
+            lines.append(f"HRV: {latest_hrv:.0f}ms today (7-day avg {avg_hrv:.0f}ms)")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"Stats build failed: {e}")
+        return "Could not build stats — try again shortly."
+
+def build_progression(db):
+    try:
+        ninety_days_ago = (date.today() - timedelta(days=90)).isoformat()
+        four_weeks_ago  = (date.today() - timedelta(days=28)).isoformat()
+
+        # Running PBs
+        activities = db.table("activities").select(
+            "date, distance_km, avg_pace_min_km, sport_type, name"
+        ).in_("sport_type", ["running", "trail_running"]).gte(
+            "date", ninety_days_ago
+        ).order("date").execute().data
+
+        def pace_to_seconds(pace):
+            if not pace:
+                return None
+            try:
+                mins, secs = divmod(float(pace) * 60, 60)
+                return int(mins) * 60 + int(secs)
+            except Exception:
+                return None
+
+        distance_buckets = {
+            "5k":        (4.8,  5.2),
+            "10k":       (9.5,  10.5),
+            "Half marathon": (20.5, 21.5),
+            "Marathon":  (41.5, 42.5),
+        }
+
+        pb_lines = []
+        for label, (lo, hi) in distance_buckets.items():
+            matches = [
+                a for a in activities
+                if a.get("distance_km") and lo <= a["distance_km"] <= hi
+                and a.get("avg_pace_min_km")
+            ]
+            if matches:
+                best = min(matches, key=lambda a: pace_to_seconds(a["avg_pace_min_km"]))
+                pace = best["avg_pace_min_km"]
+                mins = int(pace)
+                secs = int((pace - mins) * 60)
+                pb_lines.append(f"{label}: {mins}:{secs:02d}/km on {best['date']}")
+
+        # Gym progression — exercises with max weight increase in last 4 weeks
+        all_ex = db.table("gym_exercises").select(
+            "exercise_name, max_weight_kg, date"
+        ).gte("date", ninety_days_ago).order("date").execute().data
+
+        recent_ex = [e for e in all_ex if e["date"] >= four_weeks_ago]
+        older_ex  = [e for e in all_ex if e["date"] < four_weeks_ago]
+
+        by_name_recent = {}
+        for e in recent_ex:
+            name = e.get("exercise_name")
+            w    = e.get("max_weight_kg") or 0
+            if name and w > 0:
+                if name not in by_name_recent or w > by_name_recent[name]:
+                    by_name_recent[name] = w
+
+        by_name_older = {}
+        for e in older_ex:
+            name = e.get("exercise_name")
+            w    = e.get("max_weight_kg") or 0
+            if name and w > 0:
+                if name not in by_name_older or w > by_name_older[name]:
+                    by_name_older[name] = w
+
+        gym_lines = []
+        for name, recent_weight in by_name_recent.items():
+            older_weight = by_name_older.get(name)
+            if older_weight and recent_weight > older_weight:
+                diff = round(recent_weight - older_weight, 1)
+                gym_lines.append(f"{name}: {older_weight}kg → {recent_weight}kg (+{diff}kg)")
+
+        gym_lines.sort(key=lambda x: float(x.split("+")[1].replace("kg)", "").replace("kg", "")), reverse=True)
+
+        lines = [f"Progression — last 90 days ({date.today().strftime('%d %b')})", ""]
+
+        if pb_lines:
+            lines.append("Running PBs (best avg pace by distance):")
+            lines.extend([f"- {l}" for l in pb_lines])
+        else:
+            lines.append("No running PBs found in last 90 days.")
+
+        lines.append("")
+
+        if gym_lines:
+            lines.append("Gym — exercises getting stronger (last 4 weeks vs before):")
+            lines.extend([f"- {l}" for l in gym_lines[:10]])
+        else:
+            lines.append("No gym progression found yet — keep logging!")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"Progression build failed: {e}")
+        return "Could not build progression — try again shortly."
 
 def sync_hevy(db, target_date=None):
     try:
@@ -562,7 +729,6 @@ def sync_trainingpeaks():
     window_start = today - timedelta(days=7)
     window_end   = today + timedelta(days=7)
 
-    # Get all dates currently in iCal within the sync window
     valid_dates = set()
     for component in cal.walk():
         if component.name != "VEVENT":
@@ -576,15 +742,12 @@ def sync_trainingpeaks():
         if window_start <= event_date <= window_end:
             valid_dates.add(event_date.isoformat())
 
-    # Find dates in DB window that are NOT in current iCal — clear future ones only
     existing = db.table("training_load").select("date, planned_workout").gte(
         "date", window_start.isoformat()
     ).lte("date", window_end.isoformat()).execute().data
 
     today_iso = date.today().isoformat()
     for row in existing:
-        # Only clear FUTURE dates that are no longer in iCal
-        # Past dates keep their planned workouts for compliance scoring
         if row["date"] >= today_iso and row["date"] not in valid_dates and row.get("planned_workout"):
             db.table("training_load").update({
                 "planned_workout": None,
@@ -647,50 +810,6 @@ def sync_specific_date():
     sync_hevy(db, target_date=target)
     return f"Sync done for {d}", 200
 
-@app.route("/weekly-summary", methods=["GET"])
-def weekly_summary():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    db = get_supabase()
-    ai = get_anthropic()
-
-    week_ago   = (date.today() - timedelta(days=7)).isoformat()
-    wellness   = db.table("daily_wellness").select("*").gte("date", week_ago).order("date").execute().data
-    activities = db.table("activities").select("*").gte("date", week_ago).order("date").execute().data
-    training   = db.table("training_load").select("*").gte("date", week_ago).order("date").execute().data
-    gym        = db.table("gym_sessions").select("*").gte("date", week_ago).order("date").execute().data
-
-    response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        messages=[{"role": "user", "content": f"""Write a concise weekly training summary for an athlete. Use the actual numbers.
-Structure it as:
-1. Week overview (2 sentences)
-2. Training load (sessions completed, total distance, total time, gym sessions, acute load trend)
-3. Recovery trends (HRV, sleep stages, Body Battery, stress score)
-4. Compliance (how well planned vs actual matched)
-5. One key insight or recommendation for next week
-
-WELLNESS DATA:
-{json.dumps(wellness, indent=2, default=str)}
-
-ACTIVITIES:
-{json.dumps(activities, indent=2, default=str)}
-
-TRAINING PLAN:
-{json.dumps(training, indent=2, default=str)}
-
-GYM SESSIONS:
-{json.dumps(gym, indent=2, default=str)}
-
-Keep it under 300 words. Use plain text, no markdown."""}]
-    )
-
-    summary = response.content[0].text
-    send_telegram_to_me(f"Weekly training summary\n\n{summary}")
-    print("Weekly summary sent")
-    return "Summary sent", 200
-
 @app.route("/backfill", methods=["GET"])
 def backfill():
     if not check_sync_auth():
@@ -751,7 +870,6 @@ def backfill():
 def telegram():
     global _conversation_history, _pending_routine
     db = get_supabase()
-    ai = get_anthropic()
 
     data     = request.json
     message  = data.get("message", {})
@@ -789,6 +907,20 @@ def telegram():
         send_telegram(chat_id, "Conversation history cleared!")
         return "ok", 200
 
+    if user_msg.lower() == "/stats":
+        send_telegram(chat_id, build_stats(db))
+        return "ok", 200
+
+    if user_msg.lower() == "/progression":
+        send_telegram(chat_id, build_progression(db))
+        return "ok", 200
+
+    if user_msg.lower() == "/refresh-library":
+        send_telegram(chat_id, "Refreshing Hevy exercise library...")
+        count = refresh_hevy_cache(db)
+        send_telegram(chat_id, f"Done! {count} exercises cached.")
+        return "ok", 200
+
     if user_msg.lower() in ["/sync", "/sync today"]:
         try:
             garmin = get_garmin()
@@ -820,7 +952,10 @@ def telegram():
         help_text = (
             "Available commands:\n\n"
             "/sync — sync the last 24 hours of data\n"
-            "/sync YYYY-MM-DD — sync a specific date e.g. /sync 2026-04-15\n"
+            "/sync YYYY-MM-DD — sync a specific date\n"
+            "/stats — this week's training load at a glance\n"
+            "/progression — running PBs and gym gains over 90 days\n"
+            "/refresh-library — update cached Hevy exercise library\n"
             "/clear — clear conversation history\n"
             "/help — show this message\n\n"
             "Gym session types you can request:\n"
@@ -841,7 +976,6 @@ def telegram():
     gym_sessions  = db.table("gym_sessions").select("*").gte("date", week_ago).order("date", desc=True).execute().data
     gym_exercises = db.table("gym_exercises").select("*").gte("date", week_ago).order("date", desc=True).execute().data
 
-    # Build exercise history library
     all_exercises = db.table("gym_exercises").select(
         "exercise_name, exercise_template_id, max_weight_kg, total_reps, sets"
     ).order("date", desc=True).execute().data
@@ -864,12 +998,13 @@ def telegram():
         detected_type = detect_session_type(user_msg)
         session_date  = detect_session_date(user_msg)
 
-        full_library = get_hevy_exercise_library()
-        full_library_summary = [
-            {"title": e.get("title"), "exercise_template_id": e.get("id")}
-            for e in full_library
-            if e.get("title") and e.get("id")
-        ]
+        full_library_summary = get_cached_exercise_library(db)
+        if not full_library_summary:
+            full_library_summary = [
+                {"title": e.get("title"), "exercise_template_id": e.get("id")}
+                for e in get_hevy_exercise_library()
+                if e.get("title") and e.get("id")
+            ]
 
         session_type_instruction = (
             f"SESSION TYPE REQUESTED: {detected_type}\n"
@@ -923,10 +1058,9 @@ def telegram():
             "Return only the JSON, nothing else."
         )
 
-        routine_response = ai.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": routine_prompt}]
+        routine_response = claude_sonnet(
+            [{"role": "user", "content": routine_prompt}],
+            max_tokens=2000
         )
 
         try:
@@ -1002,14 +1136,10 @@ def telegram():
 
     _conversation_history.append({"role": "user", "content": f"{context}\n\nAthlete question: {user_msg}"})
 
-    if len(_conversation_history) > 10:
-        _conversation_history = _conversation_history[-10:]
+    if len(_conversation_history) > 6:
+        _conversation_history = _conversation_history[-6:]
 
-    response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=800,
-        messages=_conversation_history
-    )
+    response = claude_sonnet(_conversation_history, max_tokens=800)
 
     reply = response.content[0].text
     _conversation_history.append({"role": "assistant", "content": reply})
