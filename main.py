@@ -246,74 +246,6 @@ def refresh_hevy_cache(db):
         print(f"Hevy cache refresh failed: {e}")
         return 0
 
-def create_hevy_stretch_exercises(db):
-    try:
-        headers = {
-            "api-key": os.environ["HEVY_API_KEY"],
-            "Content-Type": "application/json"
-        }
-
-        stretches = db.table("stretch_exercises").select("*").execute().data
-
-        created  = []
-        skipped  = []
-        failed   = []
-
-        existing = db.table("hevy_exercise_cache").select("title").execute().data
-        existing_titles = {e["title"].lower() for e in existing}
-
-        for stretch in stretches:
-            name = stretch.get("name", "").strip()
-            if not name:
-                continue
-
-            if name.lower() in existing_titles:
-                skipped.append(name)
-                continue
-
-            try:
-                response = requests.post(
-                    "https://api.hevyapp.com/v1/custom_exercise_templates",
-                    headers=headers,
-                    json={
-                        "exercise_template": {
-                            "title": name,
-                            "type":  "duration",
-                        }
-                    }
-                )
-
-                if response.status_code in [200, 201]:
-                    data = response.json()
-                    template_id = (
-                        data.get("exercise_template", {}).get("id") or
-                        data.get("id")
-                    )
-                    if template_id:
-                        db.table("hevy_exercise_cache").upsert({
-                            "exercise_template_id": template_id,
-                            "title":                name,
-                            "synced_at":            datetime.now().isoformat(),
-                        }, on_conflict="exercise_template_id").execute()
-                        created.append(name)
-                    else:
-                        failed.append(f"{name}: created but no template_id returned — {data}")
-                else:
-                    failed.append(f"{name}: {response.status_code} {response.text}")
-
-                time.sleep(0.3)
-
-            except Exception as e:
-                failed.append(f"{name}: exception — {str(e)}")
-
-        sample_failures = failed[:3]
-        print(f"Stretch exercises — created: {len(created)}, skipped: {len(skipped)}, failed: {len(failed)}")
-        return created, skipped, failed, sample_failures
-
-    except Exception as e:
-        print(f"create_hevy_stretch_exercises failed: {e}")
-        return [], [], [], [str(e)]
-        
 def get_cached_exercise_library(db):
     try:
         rows = db.table("hevy_exercise_cache").select(
@@ -323,228 +255,6 @@ def get_cached_exercise_library(db):
     except Exception as e:
         print(f"Hevy cache read failed: {e}")
         return []
-
-def import_stretch_library(db):
-    ninjas_key = os.environ.get("NINJAS_API_KEY")
-    if not ninjas_key:
-        return 0, "NINJAS_API_KEY not set"
-
-    headers = {"X-Api-Key": ninjas_key}
-
-    # Muscles to fetch stretches for
-    muscles = [
-        "hamstrings", "quadriceps", "calves", "glutes", "hip_flexors",
-        "lower_back", "upper_back", "chest", "shoulders", "triceps",
-        "biceps", "forearms", "neck", "abductors", "adductors", "traps"
-    ]
-
-    # Context tags by muscle — which routine types benefit from each muscle
-    muscle_context_map = {
-        "hamstrings":  ["post_run", "post_run_stretch", "mobility", "general"],
-        "quadriceps":  ["post_run", "post_run_stretch", "mobility", "general"],
-        "calves":      ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
-        "glutes":      ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
-        "hip_flexors": ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
-        "lower_back":  ["post_run", "post_run_stretch", "mobility", "general"],
-        "upper_back":  ["mobility", "general"],
-        "chest":       ["pre_run_stretch", "mobility", "general"],
-        "shoulders":   ["pre_run_stretch", "mobility", "general"],
-        "triceps":     ["mobility", "general"],
-        "biceps":      ["mobility", "general"],
-        "forearms":    ["mobility", "general"],
-        "neck":        ["mobility", "general"],
-        "abductors":   ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
-        "adductors":   ["post_run", "post_run_stretch", "mobility", "general"],
-        "traps":       ["mobility", "general"],
-    }
-
-    all_stretches = {}
-
-    for muscle in muscles:
-        try:
-            response = requests.get(
-                "https://api.api-ninjas.com/v1/exercises",
-                headers=headers,
-                params={"type": "stretching", "muscle": muscle, "limit": 20}
-            )
-            if response.status_code == 200:
-                exercises = response.json()
-                for ex in exercises:
-                    name = ex.get("name", "").strip()
-                    if name and name not in all_stretches:
-                        all_stretches[name] = {
-                            "name":             name,
-                            "muscle":           ex.get("muscle", muscle),
-                            "difficulty":       ex.get("difficulty"),
-                            "instructions":     ex.get("instructions"),
-                            "suitable_for":     muscle_context_map.get(muscle, ["general"]),
-                            "duration_seconds": 30,
-                            "bilateral":        True,
-                        }
-                print(f"Fetched {len(exercises)} stretches for {muscle}")
-            else:
-                print(f"API Ninjas error for {muscle}: {response.status_code}")
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"Failed to fetch stretches for {muscle}: {e}")
-
-    count = 0
-    for name, stretch in all_stretches.items():
-        try:
-            db.table("stretch_exercises").upsert(
-                stretch, on_conflict="name"
-            ).execute()
-            count += 1
-        except Exception as e:
-            print(f"Failed to insert stretch {name}: {e}")
-
-    print(f"Stretch library import complete — {count} exercises stored")
-    return count, None
-
-def build_stretch_routine(db, context_type, duration_minutes, user_msg):
-    try:
-        # Duration per exercise varies by type
-        if context_type == "pre_run_stretch":
-            seconds_per_side = 15
-        elif context_type == "post_run_stretch":
-            # Check today's session load to decide hold duration
-            today     = date.today().isoformat()
-            yesterday = (date.today() - timedelta(days=1)).isoformat()
-            recent_runs = db.table("activities").select(
-                "distance_km, exercise_load, sport_type"
-            ).in_("sport_type", ["running", "trail_running"]).gte(
-                "date", yesterday
-            ).lte("date", today).order("date", desc=True).execute().data
-
-            hard_session = False
-            if recent_runs:
-                latest = recent_runs[0]
-                km     = latest.get("distance_km") or 0
-                load   = latest.get("exercise_load") or 0
-                if km >= 15 or load >= 300:
-                    hard_session = True
-
-            seconds_per_side = 45 if hard_session else 30
-        else:
-            seconds_per_side = 30
-
-        # Time per exercise: bilateral = 2 sides + 5s transition
-        seconds_per_exercise = (seconds_per_side * 2) + 5
-        max_exercises = (duration_minutes * 60) // seconds_per_exercise
-
-        # Fetch suitable stretches from library
-        stretches = db.table("stretch_exercises").select("*").execute().data
-        suitable  = [s for s in stretches if context_type in (s.get("suitable_for") or [])]
-
-        if not suitable:
-            suitable = stretches
-
-        # Get hevy cache for template ID lookup
-        hevy_cache = db.table("hevy_exercise_cache").select(
-            "exercise_template_id, title"
-        ).execute().data
-        hevy_map = {e["title"].lower(): e["exercise_template_id"] for e in hevy_cache}
-
-        # Build context-specific selection instructions
-        if context_type == "pre_run_stretch":
-            selection_instructions = (
-                "This is a PRE RUN stretch routine. Rules:\n"
-                "- Prioritise dynamic and activation-focused movements\n"
-                "- Focus on hip flexors, glutes, calves, ankles, thoracic rotation\n"
-                "- Avoid long static holds — keep it moving\n"
-                "- Order: start with ankles/calves, move up to hips and glutes, finish with thoracic\n"
-                "- Goal is to warm up and activate, not release tension"
-            )
-        elif context_type == "post_run_stretch":
-            if hard_session:
-                selection_instructions = (
-                    "This is a POST RUN stretch routine after a HARD or LONG session. Rules:\n"
-                    "- Heavy lower body focus — calves, hamstrings, hip flexors, quads, glutes are priority\n"
-                    "- At least 70% of stretches should target lower body and hips\n"
-                    "- Include piriformis/IT band stretch if available\n"
-                    "- Add 1-2 lower back stretches\n"
-                    "- Order: calves first, then hamstrings, hip flexors, quads, glutes, lower back\n"
-                    "- Long static holds — goal is full release after significant load"
-                )
-            else:
-                selection_instructions = (
-                    "This is a POST RUN stretch routine after an easy or moderate session. Rules:\n"
-                    "- Lower body focus — calves, hamstrings, hip flexors, glutes\n"
-                    "- Can include some upper back and shoulder work\n"
-                    "- Order: calves, hamstrings, hip flexors, glutes, optional upper body\n"
-                    "- Static holds — goal is recovery and maintenance"
-                )
-        else:
-            selection_instructions = (
-                "This is a GENERAL MOBILITY routine. Rules:\n"
-                "- Balanced full body selection — hips, thoracic spine, shoulders, hamstrings, ankles\n"
-                "- Mix of static and dynamic movements\n"
-                "- Not running-specific — focus on general joint health and range of motion\n"
-                "- Order: start with hips, thoracic, shoulders, then hamstrings, ankles\n"
-                "- Goal is general maintenance and flexibility"
-            )
-
-        ai = get_anthropic()
-        selection_prompt = (
-            f"You are selecting stretches for a {duration_minutes} minute {context_type.replace('_', ' ')} routine.\n"
-            f"Pick exactly {int(max_exercises)} stretches from the available list.\n\n"
-            f"{selection_instructions}\n\n"
-            f"AVAILABLE STRETCHES:\n{json.dumps([{'name': s['name'], 'muscle': s['muscle']} for s in suitable], indent=2)}\n\n"
-            "Return ONLY a JSON array of stretch names in the order they should be performed.\n"
-            "Example: [\"Standing Quad Stretch\", \"Seated Hamstring Stretch\"]\n"
-            "Return only the JSON array, nothing else."
-        )
-
-        response = ai.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{"role": "user", "content": selection_prompt}]
-        )
-
-        raw = response.content[0].text.strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        selected_names = json.loads(raw)
-
-        exercises    = []
-        new_exercises = []
-        stretch_map  = {s["name"]: s for s in suitable}
-
-        for i, name in enumerate(selected_names[:int(max_exercises)]):
-            stretch     = stretch_map.get(name)
-            if not stretch:
-                continue
-
-            template_id = hevy_map.get(name.lower())
-            if not template_id:
-                new_exercises.append(name)
-                continue  # skip exercises not yet in Hevy
-
-            bilateral = stretch.get("bilateral", True)
-            sets = []
-            if bilateral:
-                sets = [
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
-                ]
-            else:
-                sets = [
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
-                ]
-
-            exercises.append({
-                "index":                i,
-                "title":                name,
-                "notes":                stretch.get("instructions", "")[:200] if stretch.get("instructions") else None,
-                "exercise_template_id": template_id,
-                "superset_id":          None,
-                "sets":                 sets,
-            })
-
-        return exercises, new_exercises
-
-    except Exception as e:
-        print(f"Stretch routine build failed: {e}")
-        return [], []
 
 def create_hevy_routine(routine_data):
     try:
@@ -640,6 +350,129 @@ STRETCH_CONTEXT_MAP = {
     "Mobility Stretch": "mobility",
 }
 
+def build_stretch_routine_telegram(db, context_type, duration_minutes):
+    try:
+        # Hold times vary by context
+        if context_type == "pre_run_stretch":
+            seconds_per_side = 15
+        elif context_type == "post_run_stretch":
+            today     = date.today().isoformat()
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            recent_runs = db.table("activities").select(
+                "distance_km, exercise_load, sport_type"
+            ).in_("sport_type", ["running", "trail_running"]).gte(
+                "date", yesterday
+            ).lte("date", today).order("date", desc=True).execute().data
+
+            hard_session = False
+            if recent_runs:
+                latest = recent_runs[0]
+                km     = latest.get("distance_km") or 0
+                load   = latest.get("exercise_load") or 0
+                if km >= 15 or load >= 300:
+                    hard_session = True
+            seconds_per_side = 45 if hard_session else 30
+        else:
+            seconds_per_side = 30
+
+        seconds_per_exercise = (seconds_per_side * 2) + 5
+        max_exercises = (duration_minutes * 60) // seconds_per_exercise
+
+        # Fetch suitable stretches from library
+        stretches = db.table("stretch_exercises").select("*").execute().data
+        suitable  = [s for s in stretches if context_type in (s.get("suitable_for") or [])]
+        if not suitable:
+            suitable = stretches
+
+        if not suitable:
+            return None
+
+        # Build context-specific selection instructions
+        if context_type == "pre_run_stretch":
+            selection_instructions = (
+                "PRE RUN routine — dynamic and activation-focused.\n"
+                "Prioritise hip flexors, glutes, calves, ankles, thoracic rotation.\n"
+                "Avoid long static holds. Order: ankles/calves → hips/glutes → thoracic.\n"
+                "Goal: warm up and activate, not release tension."
+            )
+        elif context_type == "post_run_stretch":
+            if hard_session:
+                selection_instructions = (
+                    "POST RUN routine after a HARD or LONG session.\n"
+                    "Heavy lower body focus — at least 70% lower body and hips.\n"
+                    "Priority: calves, hamstrings, hip flexors, quads, glutes, piriformis, lower back.\n"
+                    "Order: calves → hamstrings → hip flexors → quads → glutes → lower back.\n"
+                    "Goal: full release after significant load."
+                )
+            else:
+                selection_instructions = (
+                    "POST RUN routine after an easy or moderate session.\n"
+                    "Lower body focus — calves, hamstrings, hip flexors, glutes.\n"
+                    "Can include some upper back and shoulder work.\n"
+                    "Goal: recovery and maintenance."
+                )
+        else:
+            selection_instructions = (
+                "GENERAL MOBILITY routine — balanced full body.\n"
+                "Cover hips, thoracic spine, shoulders, hamstrings, ankles.\n"
+                "Mix of static and dynamic movements.\n"
+                "Order: hips → thoracic → shoulders → hamstrings → ankles.\n"
+                "Goal: general joint health and range of motion."
+            )
+
+        ai = get_anthropic()
+        selection_prompt = (
+            f"Select exactly {int(max_exercises)} stretches for a {duration_minutes} minute routine.\n\n"
+            f"{selection_instructions}\n\n"
+            f"AVAILABLE STRETCHES:\n{json.dumps([{'name': s['name'], 'muscle': s['muscle']} for s in suitable], indent=2)}\n\n"
+            "Return ONLY a JSON array of stretch names in order.\n"
+            "Return only the JSON array, nothing else."
+        )
+
+        response = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": selection_prompt}]
+        )
+
+        raw = response.content[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        selected_names = json.loads(raw)
+
+        stretch_map = {s["name"]: s for s in suitable}
+
+        lines = []
+        total_seconds = 0
+        for i, name in enumerate(selected_names[:int(max_exercises)]):
+            stretch = stretch_map.get(name)
+            if not stretch:
+                continue
+            bilateral = stretch.get("bilateral", True)
+            hold      = seconds_per_side
+            if bilateral:
+                lines.append(f"{i+1}. {name} — {hold}s each side")
+                total_seconds += hold * 2 + 5
+            else:
+                lines.append(f"{i+1}. {name} — {hold}s")
+                total_seconds += hold + 5
+
+        total_mins = total_seconds // 60
+        total_secs = total_seconds % 60
+
+        header = (
+            f"{context_type.replace('_', ' ').title()} — {duration_minutes} min\n"
+            f"Hold times: {seconds_per_side}s {'each side' if context_type != 'pre_run_stretch' else '(dynamic)'}\n"
+            f"Total: ~{total_mins}m {total_secs}s\n"
+        )
+        if context_type == "post_run_stretch" and hard_session:
+            header += "Hard session detected — extended holds today.\n"
+
+        return header + "\n" + "\n".join(lines)
+
+    except Exception as e:
+        print(f"Stretch routine build failed: {e}")
+        return None
+
 def format_routine_for_telegram(routine_data, new_exercises=None):
     lines = [f"Suggested session: {routine_data['title']}", ""]
     for i, ex in enumerate(routine_data["exercises"]):
@@ -660,7 +493,7 @@ def format_routine_for_telegram(routine_data, new_exercises=None):
 
     if new_exercises:
         lines.append("")
-        lines.append("* Not yet in Hevy — add as a custom exercise before starting.")
+        lines.append("* New exercise — adjust weight in Hevy before starting if needed.")
 
     lines.append("")
     lines.append("Reply 'yes' to create this routine in Hevy, or 'no' to cancel.")
@@ -969,7 +802,7 @@ def build_stats(db):
 
         total_gym_vol = round(sum(e.get("total_volume_kg") or 0 for e in gym_ex), 0)
 
-        acute_loads = [w["acute_load"] for w in wellness if w.get("acute_load")]
+        acute_loads  = [w["acute_load"] for w in wellness if w.get("acute_load")]
         current_load = acute_loads[0] if acute_loads else None
         avg_load     = round(sum(acute_loads) / len(acute_loads), 0) if acute_loads else None
 
@@ -1072,7 +905,10 @@ def build_progression(db):
                 diff = round(recent_weight - older_weight, 1)
                 gym_lines.append(f"{name}: {older_weight}kg → {recent_weight}kg (+{diff}kg)")
 
-        gym_lines.sort(key=lambda x: float(x.split("+")[1].replace("kg)", "").replace("kg", "")), reverse=True)
+        gym_lines.sort(
+            key=lambda x: float(x.split("+")[1].replace("kg)", "").replace("kg", "")),
+            reverse=True
+        )
 
         lines = [f"Progression — last 90 days ({date.today().strftime('%d %b')})", ""]
 
@@ -1124,29 +960,6 @@ def sync_specific_date():
     sync_hevy(db, target_date=target)
     return f"Sync done for {d}", 200
 
-@app.route("/import-stretches", methods=["GET"])
-def import_stretches():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    db = get_supabase()
-    count, error = import_stretch_library(db)
-    if error:
-        return f"Import failed: {error}", 500
-    return f"Stretch library imported — {count} exercises stored", 200
-
-@app.route("/create-stretch-exercises", methods=["GET"])
-def create_stretch_exercises_route():
-    if not check_sync_auth():
-        return "Unauthorised", 401
-    db = get_supabase()
-    created, skipped, failed, sample_failures = create_hevy_stretch_exercises(db)
-    return (
-        f"Done — created: {len(created)}, "
-        f"skipped: {len(skipped)}, "
-        f"failed: {len(failed)}\n\n"
-        f"Sample failures:\n" + "\n".join(sample_failures)
-    ), 200
-    
 @app.route("/backfill", methods=["GET"])
 def backfill():
     if not check_sync_auth():
@@ -1260,7 +1073,7 @@ def telegram():
 
     if user_msg.lower() in ["/sync", "/sync today"]:
         try:
-            garmin = get_garmin()
+            garmin    = get_garmin()
             yesterday = (date.today() - timedelta(days=1)).isoformat()
             today     = date.today().isoformat()
             sync_day(garmin, db, yesterday)
@@ -1298,7 +1111,7 @@ def telegram():
             "Gym session types:\n"
             "- Push, Pull, Legs, Upper Body, Full Body\n"
             "- Running Maintenance, Pre Run, Post Run\n\n"
-            "Stretching routines:\n"
+            "Stretching routines (delivered in chat):\n"
             "- Pre Run Stretch, Post Run Stretch, Mobility\n"
             "- Specify duration e.g. 'make me a 20 min post run stretch'\n\n"
             "Or just ask me anything about your training!"
@@ -1339,34 +1152,23 @@ def telegram():
 
     if is_routine_request:
         detected_type = detect_session_type(user_msg)
-        session_date  = detect_session_date(user_msg)
 
-        # --- Stretching routine path ---
+        # --- Stretching routine path — delivered in Telegram ---
         if detected_type in STRETCH_CONTEXT_MAP:
-            context_type   = STRETCH_CONTEXT_MAP[detected_type]
-            duration_mins  = detect_stretch_duration(user_msg)
+            context_type  = STRETCH_CONTEXT_MAP[detected_type]
+            duration_mins = detect_stretch_duration(user_msg)
 
-            send_telegram(chat_id, f"Building your {duration_mins} min {detected_type.lower()} routine...")
+            routine_text = build_stretch_routine_telegram(db, context_type, duration_mins)
 
-            exercises, new_exercises = build_stretch_routine(db, context_type, duration_mins, user_msg)
-
-            if not exercises:
-                send_telegram(chat_id, "No stretches found in the library. Run /import-stretches first to populate the stretch library.")
-                return "ok", 200
-
-            title = f"{detected_type} {duration_mins}min - {session_date}"
-
-            _pending_routine = {
-                "title":     title,
-                "folder_id": None,
-                "exercises": exercises,
-            }
-
-            reply = format_routine_for_telegram(_pending_routine, set(new_exercises) if new_exercises else None)
-            send_telegram(chat_id, reply)
+            if not routine_text:
+                send_telegram(chat_id, "No stretches found in the library. The stretch database may be empty — check Supabase.")
+            else:
+                send_telegram(chat_id, routine_text)
             return "ok", 200
 
         # --- Gym routine path ---
+        session_date = detect_session_date(user_msg)
+
         full_library_summary = get_cached_exercise_library(db)
         if not full_library_summary:
             full_library_summary = [
