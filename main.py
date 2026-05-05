@@ -280,11 +280,8 @@ def create_hevy_stretch_exercises(db):
                     headers=headers,
                     json={
                         "exercise_template": {
-                            "title":       name,
-                            "type":        "duration",
-                            "primary_muscle_group":   stretch.get("muscle", "other"),
-                            "secondary_muscle_groups": [],
-                            "is_custom":   True,
+                            "title": name,
+                            "type":  "duration",
                         }
                     }
                 )
