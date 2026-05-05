@@ -246,6 +246,82 @@ def refresh_hevy_cache(db):
         print(f"Hevy cache refresh failed: {e}")
         return 0
 
+def create_hevy_stretch_exercises(db):
+    try:
+        headers = {
+            "api-key": os.environ["HEVY_API_KEY"],
+            "Content-Type": "application/json"
+        }
+
+        # Get all stretches from Supabase
+        stretches = db.table("stretch_exercises").select("*").execute().data
+
+        created  = []
+        skipped  = []
+        failed   = []
+
+        # Get existing Hevy cache to avoid duplicates
+        existing = db.table("hevy_exercise_cache").select("title").execute().data
+        existing_titles = {e["title"].lower() for e in existing}
+
+        for stretch in stretches:
+            name = stretch.get("name", "").strip()
+            if not name:
+                continue
+
+            # Skip if already in Hevy cache
+            if name.lower() in existing_titles:
+                skipped.append(name)
+                continue
+
+            try:
+                response = requests.post(
+                    "https://api.hevyapp.com/v1/custom_exercise_templates",
+                    headers=headers,
+                    json={
+                        "exercise_template": {
+                            "title":       name,
+                            "type":        "duration",
+                            "primary_muscle_group":   stretch.get("muscle", "other"),
+                            "secondary_muscle_groups": [],
+                            "is_custom":   True,
+                        }
+                    }
+                )
+
+                if response.status_code in [200, 201]:
+                    data = response.json()
+                    template_id = (
+                        data.get("exercise_template", {}).get("id") or
+                        data.get("id")
+                    )
+                    if template_id:
+                        # Store in hevy_exercise_cache immediately
+                        db.table("hevy_exercise_cache").upsert({
+                            "exercise_template_id": template_id,
+                            "title":                name,
+                            "synced_at":            datetime.now().isoformat(),
+                        }, on_conflict="exercise_template_id").execute()
+                        created.append(name)
+                    else:
+                        failed.append(name)
+                else:
+                    print(f"Failed to create {name}: {response.status_code} {response.text}")
+                    failed.append(name)
+
+                time.sleep(0.3)  # avoid rate limiting
+
+            except Exception as e:
+                print(f"Error creating {name}: {e}")
+                failed.append(name)
+
+        print(f"Stretch exercises — created: {len(created)}, skipped: {len(skipped)}, failed: {len(failed)}")
+        return created, skipped, failed
+
+    except Exception as e:
+        print(f"create_hevy_stretch_exercises failed: {e}")
+        return [], [], []
+        
 def get_cached_exercise_library(db):
     try:
         rows = db.table("hevy_exercise_cache").select(
@@ -1066,6 +1142,18 @@ def import_stretches():
         return f"Import failed: {error}", 500
     return f"Stretch library imported — {count} exercises stored", 200
 
+@app.route("/create-stretch-exercises", methods=["GET"])
+def create_stretch_exercises_route():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    db = get_supabase()
+    created, skipped, failed = create_hevy_stretch_exercises(db)
+    return (
+        f"Done — created: {len(created)}, "
+        f"skipped (already exist): {len(skipped)}, "
+        f"failed: {len(failed)}"
+    ), 200
+    
 @app.route("/backfill", methods=["GET"])
 def backfill():
     if not check_sync_auth():
