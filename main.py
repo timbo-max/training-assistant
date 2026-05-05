@@ -449,6 +449,7 @@ def build_stretch_routine(db, context_type, duration_minutes, user_msg):
             template_id = hevy_map.get(name.lower())
             if not template_id:
                 new_exercises.append(name)
+                continue  # skip exercises not yet in Hevy
 
             bilateral = stretch.get("bilateral", True)
             sets = []
