@@ -335,18 +335,41 @@ def import_stretch_library(db):
 
 def build_stretch_routine(db, context_type, duration_minutes, user_msg):
     try:
-        target_seconds = duration_minutes * 60
-        # Each stretch is 30s + 5s transition, bilateral = 2 sides so 70s total per exercise
-        seconds_per_exercise = 70
+        # Duration per exercise varies by type
+        if context_type == "pre_run_stretch":
+            seconds_per_side = 15
+        elif context_type == "post_run_stretch":
+            # Check today's session load to decide hold duration
+            today     = date.today().isoformat()
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            recent_runs = db.table("activities").select(
+                "distance_km, exercise_load, sport_type"
+            ).in_("sport_type", ["running", "trail_running"]).gte(
+                "date", yesterday
+            ).lte("date", today).order("date", desc=True).execute().data
 
-        max_exercises = target_seconds // seconds_per_exercise
+            hard_session = False
+            if recent_runs:
+                latest = recent_runs[0]
+                km     = latest.get("distance_km") or 0
+                load   = latest.get("exercise_load") or 0
+                if km >= 15 or load >= 300:
+                    hard_session = True
+
+            seconds_per_side = 45 if hard_session else 30
+        else:
+            seconds_per_side = 30
+
+        # Time per exercise: bilateral = 2 sides + 5s transition
+        seconds_per_exercise = (seconds_per_side * 2) + 5
+        max_exercises = (duration_minutes * 60) // seconds_per_exercise
 
         # Fetch suitable stretches from library
         stretches = db.table("stretch_exercises").select("*").execute().data
-        suitable = [s for s in stretches if context_type in (s.get("suitable_for") or [])]
+        suitable  = [s for s in stretches if context_type in (s.get("suitable_for") or [])]
 
         if not suitable:
-            suitable = stretches  # fallback to all if none tagged
+            suitable = stretches
 
         # Get hevy cache for template ID lookup
         hevy_cache = db.table("hevy_exercise_cache").select(
@@ -354,16 +377,54 @@ def build_stretch_routine(db, context_type, duration_minutes, user_msg):
         ).execute().data
         hevy_map = {e["title"].lower(): e["exercise_template_id"] for e in hevy_cache}
 
-        # Let Claude pick the best stretches for the context
+        # Build context-specific selection instructions
+        if context_type == "pre_run_stretch":
+            selection_instructions = (
+                "This is a PRE RUN stretch routine. Rules:\n"
+                "- Prioritise dynamic and activation-focused movements\n"
+                "- Focus on hip flexors, glutes, calves, ankles, thoracic rotation\n"
+                "- Avoid long static holds — keep it moving\n"
+                "- Order: start with ankles/calves, move up to hips and glutes, finish with thoracic\n"
+                "- Goal is to warm up and activate, not release tension"
+            )
+        elif context_type == "post_run_stretch":
+            if hard_session:
+                selection_instructions = (
+                    "This is a POST RUN stretch routine after a HARD or LONG session. Rules:\n"
+                    "- Heavy lower body focus — calves, hamstrings, hip flexors, quads, glutes are priority\n"
+                    "- At least 70% of stretches should target lower body and hips\n"
+                    "- Include piriformis/IT band stretch if available\n"
+                    "- Add 1-2 lower back stretches\n"
+                    "- Order: calves first, then hamstrings, hip flexors, quads, glutes, lower back\n"
+                    "- Long static holds — goal is full release after significant load"
+                )
+            else:
+                selection_instructions = (
+                    "This is a POST RUN stretch routine after an easy or moderate session. Rules:\n"
+                    "- Lower body focus — calves, hamstrings, hip flexors, glutes\n"
+                    "- Can include some upper back and shoulder work\n"
+                    "- Order: calves, hamstrings, hip flexors, glutes, optional upper body\n"
+                    "- Static holds — goal is recovery and maintenance"
+                )
+        else:
+            selection_instructions = (
+                "This is a GENERAL MOBILITY routine. Rules:\n"
+                "- Balanced full body selection — hips, thoracic spine, shoulders, hamstrings, ankles\n"
+                "- Mix of static and dynamic movements\n"
+                "- Not running-specific — focus on general joint health and range of motion\n"
+                "- Order: start with hips, thoracic, shoulders, then hamstrings, ankles\n"
+                "- Goal is general maintenance and flexibility"
+            )
+
         ai = get_anthropic()
         selection_prompt = (
             f"You are selecting stretches for a {duration_minutes} minute {context_type.replace('_', ' ')} routine.\n"
-            f"Pick exactly {max_exercises} stretches from this list that are most appropriate for the context.\n"
-            f"Prioritise a balanced full body selection appropriate for {context_type.replace('_', ' ')}.\n\n"
+            f"Pick exactly {int(max_exercises)} stretches from the available list.\n\n"
+            f"{selection_instructions}\n\n"
             f"AVAILABLE STRETCHES:\n{json.dumps([{'name': s['name'], 'muscle': s['muscle']} for s in suitable], indent=2)}\n\n"
-            f"Return ONLY a JSON array of stretch names in the order they should be performed.\n"
-            f"Example: [\"Standing Quad Stretch\", \"Seated Hamstring Stretch\"]\n"
-            f"Return only the JSON array, nothing else."
+            "Return ONLY a JSON array of stretch names in the order they should be performed.\n"
+            "Example: [\"Standing Quad Stretch\", \"Seated Hamstring Stretch\"]\n"
+            "Return only the JSON array, nothing else."
         )
 
         response = ai.messages.create(
@@ -376,13 +437,12 @@ def build_stretch_routine(db, context_type, duration_minutes, user_msg):
         raw = raw.replace("```json", "").replace("```", "").strip()
         selected_names = json.loads(raw)
 
-        # Build exercises list
-        exercises = []
+        exercises    = []
         new_exercises = []
-        stretch_map = {s["name"]: s for s in suitable}
+        stretch_map  = {s["name"]: s for s in suitable}
 
-        for i, name in enumerate(selected_names[:max_exercises]):
-            stretch = stretch_map.get(name)
+        for i, name in enumerate(selected_names[:int(max_exercises)]):
+            stretch     = stretch_map.get(name)
             if not stretch:
                 continue
 
@@ -390,18 +450,16 @@ def build_stretch_routine(db, context_type, duration_minutes, user_msg):
             if not template_id:
                 new_exercises.append(name)
 
-            duration = stretch.get("duration_seconds", 30)
             bilateral = stretch.get("bilateral", True)
-
             sets = []
             if bilateral:
                 sets = [
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
                 ]
             else:
                 sets = [
-                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": seconds_per_side, "distance_meters": None, "custom_metric": None},
                 ]
 
             exercises.append({
