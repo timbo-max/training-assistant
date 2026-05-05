@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import time
 from datetime import date, timedelta, datetime
 from flask import Flask, request
 from garminconnect import Garmin
@@ -255,6 +256,169 @@ def get_cached_exercise_library(db):
         print(f"Hevy cache read failed: {e}")
         return []
 
+def import_stretch_library(db):
+    ninjas_key = os.environ.get("NINJAS_API_KEY")
+    if not ninjas_key:
+        return 0, "NINJAS_API_KEY not set"
+
+    headers = {"X-Api-Key": ninjas_key}
+
+    # Muscles to fetch stretches for
+    muscles = [
+        "hamstrings", "quadriceps", "calves", "glutes", "hip_flexors",
+        "lower_back", "upper_back", "chest", "shoulders", "triceps",
+        "biceps", "forearms", "neck", "abductors", "adductors", "traps"
+    ]
+
+    # Context tags by muscle — which routine types benefit from each muscle
+    muscle_context_map = {
+        "hamstrings":  ["post_run", "post_run_stretch", "mobility", "general"],
+        "quadriceps":  ["post_run", "post_run_stretch", "mobility", "general"],
+        "calves":      ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
+        "glutes":      ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
+        "hip_flexors": ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
+        "lower_back":  ["post_run", "post_run_stretch", "mobility", "general"],
+        "upper_back":  ["mobility", "general"],
+        "chest":       ["pre_run_stretch", "mobility", "general"],
+        "shoulders":   ["pre_run_stretch", "mobility", "general"],
+        "triceps":     ["mobility", "general"],
+        "biceps":      ["mobility", "general"],
+        "forearms":    ["mobility", "general"],
+        "neck":        ["mobility", "general"],
+        "abductors":   ["post_run", "post_run_stretch", "pre_run_stretch", "mobility", "general"],
+        "adductors":   ["post_run", "post_run_stretch", "mobility", "general"],
+        "traps":       ["mobility", "general"],
+    }
+
+    all_stretches = {}
+
+    for muscle in muscles:
+        try:
+            response = requests.get(
+                "https://api.api-ninjas.com/v1/exercises",
+                headers=headers,
+                params={"type": "stretching", "muscle": muscle, "limit": 20}
+            )
+            if response.status_code == 200:
+                exercises = response.json()
+                for ex in exercises:
+                    name = ex.get("name", "").strip()
+                    if name and name not in all_stretches:
+                        all_stretches[name] = {
+                            "name":             name,
+                            "muscle":           ex.get("muscle", muscle),
+                            "difficulty":       ex.get("difficulty"),
+                            "instructions":     ex.get("instructions"),
+                            "suitable_for":     muscle_context_map.get(muscle, ["general"]),
+                            "duration_seconds": 30,
+                            "bilateral":        True,
+                        }
+                print(f"Fetched {len(exercises)} stretches for {muscle}")
+            else:
+                print(f"API Ninjas error for {muscle}: {response.status_code}")
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"Failed to fetch stretches for {muscle}: {e}")
+
+    count = 0
+    for name, stretch in all_stretches.items():
+        try:
+            db.table("stretch_exercises").upsert(
+                stretch, on_conflict="name"
+            ).execute()
+            count += 1
+        except Exception as e:
+            print(f"Failed to insert stretch {name}: {e}")
+
+    print(f"Stretch library import complete — {count} exercises stored")
+    return count, None
+
+def build_stretch_routine(db, context_type, duration_minutes, user_msg):
+    try:
+        target_seconds = duration_minutes * 60
+        # Each stretch is 30s + 5s transition, bilateral = 2 sides so 70s total per exercise
+        seconds_per_exercise = 70
+
+        max_exercises = target_seconds // seconds_per_exercise
+
+        # Fetch suitable stretches from library
+        stretches = db.table("stretch_exercises").select("*").execute().data
+        suitable = [s for s in stretches if context_type in (s.get("suitable_for") or [])]
+
+        if not suitable:
+            suitable = stretches  # fallback to all if none tagged
+
+        # Get hevy cache for template ID lookup
+        hevy_cache = db.table("hevy_exercise_cache").select(
+            "exercise_template_id, title"
+        ).execute().data
+        hevy_map = {e["title"].lower(): e["exercise_template_id"] for e in hevy_cache}
+
+        # Let Claude pick the best stretches for the context
+        ai = get_anthropic()
+        selection_prompt = (
+            f"You are selecting stretches for a {duration_minutes} minute {context_type.replace('_', ' ')} routine.\n"
+            f"Pick exactly {max_exercises} stretches from this list that are most appropriate for the context.\n"
+            f"Prioritise a balanced full body selection appropriate for {context_type.replace('_', ' ')}.\n\n"
+            f"AVAILABLE STRETCHES:\n{json.dumps([{'name': s['name'], 'muscle': s['muscle']} for s in suitable], indent=2)}\n\n"
+            f"Return ONLY a JSON array of stretch names in the order they should be performed.\n"
+            f"Example: [\"Standing Quad Stretch\", \"Seated Hamstring Stretch\"]\n"
+            f"Return only the JSON array, nothing else."
+        )
+
+        response = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": selection_prompt}]
+        )
+
+        raw = response.content[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        selected_names = json.loads(raw)
+
+        # Build exercises list
+        exercises = []
+        new_exercises = []
+        stretch_map = {s["name"]: s for s in suitable}
+
+        for i, name in enumerate(selected_names[:max_exercises]):
+            stretch = stretch_map.get(name)
+            if not stretch:
+                continue
+
+            template_id = hevy_map.get(name.lower())
+            if not template_id:
+                new_exercises.append(name)
+
+            duration = stretch.get("duration_seconds", 30)
+            bilateral = stretch.get("bilateral", True)
+
+            sets = []
+            if bilateral:
+                sets = [
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
+                ]
+            else:
+                sets = [
+                    {"type": "normal", "weight_kg": None, "reps": None, "duration_seconds": duration, "distance_meters": None, "custom_metric": None},
+                ]
+
+            exercises.append({
+                "index":                i,
+                "title":                name,
+                "notes":                stretch.get("instructions", "")[:200] if stretch.get("instructions") else None,
+                "exercise_template_id": template_id,
+                "superset_id":          None,
+                "sets":                 sets,
+            })
+
+        return exercises, new_exercises
+
+    except Exception as e:
+        print(f"Stretch routine build failed: {e}")
+        return [], []
+
 def create_hevy_routine(routine_data):
     try:
         headers = {
@@ -284,12 +448,15 @@ def create_hevy_routine(routine_data):
 
 def detect_session_type(user_msg):
     prompt = (
-        "Based on this gym session request, identify the session type.\n"
-        "Return ONLY one of these exact values: Push, Pull, Legs, Upper Body, Full Body, Running Maintenance, Pre Run, Post Run\n\n"
+        "Based on this session request, identify the session type.\n"
+        "Return ONLY one of these exact values: Push, Pull, Legs, Upper Body, Full Body, Running Maintenance, Pre Run, Post Run, Pre Run Stretch, Post Run Stretch, Mobility Stretch\n\n"
         f"Request: \"{user_msg}\"\n\n"
         "Rules:\n"
-        "- after a run or post run or after long run or after my run = Post Run\n"
-        "- before a run or pre run or before my run = Pre Run\n"
+        "- after a run or post run or after long run or after my run = Post Run (gym session)\n"
+        "- before a run or pre run or before my run = Pre Run (gym session)\n"
+        "- post run stretch or stretch after run or recovery stretch or stretching after = Post Run Stretch\n"
+        "- pre run stretch or stretch before run or warm up stretch or stretching before = Pre Run Stretch\n"
+        "- mobility or stretching routine or general stretch or flexibility or just stretch = Mobility Stretch\n"
         "- full body or full bosy or any full body variation = Full Body\n"
         "- upper body = Upper Body\n"
         "- running maintenance or plyometrics or plyo = Running Maintenance\n"
@@ -313,6 +480,22 @@ def detect_session_date(user_msg):
     result = claude_haiku(prompt)
     return result if result != "TODAY" else date.today().strftime("%d %b %Y")
 
+def detect_stretch_duration(user_msg):
+    prompt = (
+        "Extract the requested duration in minutes from this message.\n"
+        f"Message: \"{user_msg}\"\n\n"
+        "If the message mentions 10 minutes or 10 min, return 10.\n"
+        "If the message mentions 20 minutes or 20 min, return 20.\n"
+        "If the message mentions 30 minutes or 30 min, return 30.\n"
+        "If no duration is mentioned, return 10.\n"
+        "Return only the integer number, nothing else."
+    )
+    result = claude_haiku(prompt)
+    try:
+        return int(result.strip())
+    except Exception:
+        return 10
+
 SESSION_TYPE_DESCRIPTIONS = {
     "Push": "Chest, shoulders, triceps. Include pressing movements like chest press, shoulder press, dips, and tricep work. No pulling or leg movements.",
     "Pull": "Back and biceps. Include rowing movements, lat pulldowns, face pulls, curls. No pushing or leg movements.",
@@ -322,6 +505,12 @@ SESSION_TYPE_DESCRIPTIONS = {
     "Running Maintenance": "Full body session focused on athletic performance and running economy. Include plyometric exercises (broad jumps, pogo jumps, box jumps, bounding), explosive movements, single leg work, and hip/glute strength. Avoid heavy slow lifts that cause excessive DOMS. This session should complement running training not compromise it.",
     "Pre Run": "Low DOMS risk session before a key running session the next day. Avoid plyometrics, heavy squats, heavy deadlifts, or anything that causes significant muscle damage. Focus on activation, light strength, and mobility-friendly movements. Keep volume moderate and avoid failure. Examples: light upper body pressing and pulling, core work, hip activation, light single leg work with minimal eccentric load.",
     "Post Run": "Recovery-friendly strength session after a run. No plyometrics whatsoever. Focus on steady controlled strength work. Can include moderate squats, upper body pressing and pulling, core, and accessory work. Avoid explosive or high-impact movements. Weights should be moderate — not a PR day.",
+}
+
+STRETCH_CONTEXT_MAP = {
+    "Pre Run Stretch":  "pre_run_stretch",
+    "Post Run Stretch": "post_run_stretch",
+    "Mobility Stretch": "mobility",
 }
 
 def format_routine_for_telegram(routine_data, new_exercises=None):
@@ -344,161 +533,11 @@ def format_routine_for_telegram(routine_data, new_exercises=None):
 
     if new_exercises:
         lines.append("")
-        lines.append("* New exercise — adjust weight in Hevy before starting if needed.")
+        lines.append("* Not yet in Hevy — add as a custom exercise before starting.")
 
     lines.append("")
     lines.append("Reply 'yes' to create this routine in Hevy, or 'no' to cancel.")
     return "\n".join(lines)
-
-def build_stats(db):
-    try:
-        week_ago   = (date.today() - timedelta(days=7)).isoformat()
-        activities = db.table("activities").select("*").gte("date", week_ago).execute().data
-        wellness   = db.table("daily_wellness").select("date, acute_load, hrv_rmssd").gte("date", week_ago).order("date", desc=True).execute().data
-        gym        = db.table("gym_sessions").select("*").gte("date", week_ago).execute().data
-        gym_ex     = db.table("gym_exercises").select("total_volume_kg").gte("date", week_ago).execute().data
-
-        runs   = [a for a in activities if a.get("sport_type") in ["running", "trail_running"]]
-        rides  = [a for a in activities if a.get("sport_type") in ["cycling", "road_biking"]]
-
-        total_run_km  = round(sum(a.get("distance_km") or 0 for a in runs), 1)
-        total_run_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in runs)
-        total_run_hrs = f"{int(total_run_sec // 3600)}h {int((total_run_sec % 3600) // 60)}m"
-
-        total_ride_km  = round(sum(a.get("distance_km") or 0 for a in rides), 1)
-        total_ride_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in rides)
-        total_ride_hrs = f"{int(total_ride_sec // 3600)}h {int((total_ride_sec % 3600) // 60)}m"
-
-        total_gym_vol = round(sum(e.get("total_volume_kg") or 0 for e in gym_ex), 0)
-
-        acute_loads = [w["acute_load"] for w in wellness if w.get("acute_load")]
-        current_load = acute_loads[0] if acute_loads else None
-        avg_load     = round(sum(acute_loads) / len(acute_loads), 0) if acute_loads else None
-
-        hrv_values = [w["hrv_rmssd"] for w in wellness if w.get("hrv_rmssd")]
-        avg_hrv    = round(sum(hrv_values) / len(hrv_values), 0) if hrv_values else None
-        latest_hrv = hrv_values[0] if hrv_values else None
-
-        lines = [f"Training stats — last 7 days ({date.today().strftime('%d %b')})", ""]
-
-        if runs:
-            lines.append(f"Running: {len(runs)} sessions, {total_run_km}km, {total_run_hrs}")
-        if rides:
-            lines.append(f"Riding: {len(rides)} sessions, {total_ride_km}km, {total_ride_hrs}")
-        if gym:
-            lines.append(f"Gym: {len(gym)} sessions, {total_gym_vol:.0f}kg total volume")
-        if not runs and not rides and not gym:
-            lines.append("No sessions recorded this week.")
-
-        lines.append("")
-        if current_load and avg_load:
-            trend = "up" if current_load > avg_load else "down"
-            lines.append(f"Acute load: {current_load:.0f} (7-day avg {avg_load:.0f}, trending {trend})")
-        if latest_hrv and avg_hrv:
-            lines.append(f"HRV: {latest_hrv:.0f}ms today (7-day avg {avg_hrv:.0f}ms)")
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        print(f"Stats build failed: {e}")
-        return "Could not build stats — try again shortly."
-
-def build_progression(db):
-    try:
-        ninety_days_ago = (date.today() - timedelta(days=90)).isoformat()
-        four_weeks_ago  = (date.today() - timedelta(days=28)).isoformat()
-
-        # Running PBs
-        activities = db.table("activities").select(
-            "date, distance_km, avg_pace_min_km, sport_type, name"
-        ).in_("sport_type", ["running", "trail_running"]).gte(
-            "date", ninety_days_ago
-        ).order("date").execute().data
-
-        def pace_to_seconds(pace):
-            if not pace:
-                return None
-            try:
-                mins, secs = divmod(float(pace) * 60, 60)
-                return int(mins) * 60 + int(secs)
-            except Exception:
-                return None
-
-        distance_buckets = {
-            "5k":        (4.8,  5.2),
-            "10k":       (9.5,  10.5),
-            "Half marathon": (20.5, 21.5),
-            "Marathon":  (41.5, 42.5),
-        }
-
-        pb_lines = []
-        for label, (lo, hi) in distance_buckets.items():
-            matches = [
-                a for a in activities
-                if a.get("distance_km") and lo <= a["distance_km"] <= hi
-                and a.get("avg_pace_min_km")
-            ]
-            if matches:
-                best = min(matches, key=lambda a: pace_to_seconds(a["avg_pace_min_km"]))
-                pace = best["avg_pace_min_km"]
-                mins = int(pace)
-                secs = int((pace - mins) * 60)
-                pb_lines.append(f"{label}: {mins}:{secs:02d}/km on {best['date']}")
-
-        # Gym progression — exercises with max weight increase in last 4 weeks
-        all_ex = db.table("gym_exercises").select(
-            "exercise_name, max_weight_kg, date"
-        ).gte("date", ninety_days_ago).order("date").execute().data
-
-        recent_ex = [e for e in all_ex if e["date"] >= four_weeks_ago]
-        older_ex  = [e for e in all_ex if e["date"] < four_weeks_ago]
-
-        by_name_recent = {}
-        for e in recent_ex:
-            name = e.get("exercise_name")
-            w    = e.get("max_weight_kg") or 0
-            if name and w > 0:
-                if name not in by_name_recent or w > by_name_recent[name]:
-                    by_name_recent[name] = w
-
-        by_name_older = {}
-        for e in older_ex:
-            name = e.get("exercise_name")
-            w    = e.get("max_weight_kg") or 0
-            if name and w > 0:
-                if name not in by_name_older or w > by_name_older[name]:
-                    by_name_older[name] = w
-
-        gym_lines = []
-        for name, recent_weight in by_name_recent.items():
-            older_weight = by_name_older.get(name)
-            if older_weight and recent_weight > older_weight:
-                diff = round(recent_weight - older_weight, 1)
-                gym_lines.append(f"{name}: {older_weight}kg → {recent_weight}kg (+{diff}kg)")
-
-        gym_lines.sort(key=lambda x: float(x.split("+")[1].replace("kg)", "").replace("kg", "")), reverse=True)
-
-        lines = [f"Progression — last 90 days ({date.today().strftime('%d %b')})", ""]
-
-        if pb_lines:
-            lines.append("Running PBs (best avg pace by distance):")
-            lines.extend([f"- {l}" for l in pb_lines])
-        else:
-            lines.append("No running PBs found in last 90 days.")
-
-        lines.append("")
-
-        if gym_lines:
-            lines.append("Gym — exercises getting stronger (last 4 weeks vs before):")
-            lines.extend([f"- {l}" for l in gym_lines[:10]])
-        else:
-            lines.append("No gym progression found yet — keep logging!")
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        print(f"Progression build failed: {e}")
-        return "Could not build progression — try again shortly."
 
 def sync_hevy(db, target_date=None):
     try:
@@ -782,6 +821,154 @@ def sync_trainingpeaks():
 
     print("TrainingPeaks sync complete")
 
+def build_stats(db):
+    try:
+        week_ago   = (date.today() - timedelta(days=7)).isoformat()
+        activities = db.table("activities").select("*").gte("date", week_ago).execute().data
+        wellness   = db.table("daily_wellness").select("date, acute_load, hrv_rmssd").gte("date", week_ago).order("date", desc=True).execute().data
+        gym        = db.table("gym_sessions").select("*").gte("date", week_ago).execute().data
+        gym_ex     = db.table("gym_exercises").select("total_volume_kg").gte("date", week_ago).execute().data
+
+        runs   = [a for a in activities if a.get("sport_type") in ["running", "trail_running"]]
+        rides  = [a for a in activities if a.get("sport_type") in ["cycling", "road_biking"]]
+
+        total_run_km  = round(sum(a.get("distance_km") or 0 for a in runs), 1)
+        total_run_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in runs)
+        total_run_hrs = f"{int(total_run_sec // 3600)}h {int((total_run_sec % 3600) // 60)}m"
+
+        total_ride_km  = round(sum(a.get("distance_km") or 0 for a in rides), 1)
+        total_ride_sec = sum(a.get("moving_time_seconds") or a.get("duration_seconds") or 0 for a in rides)
+        total_ride_hrs = f"{int(total_ride_sec // 3600)}h {int((total_ride_sec % 3600) // 60)}m"
+
+        total_gym_vol = round(sum(e.get("total_volume_kg") or 0 for e in gym_ex), 0)
+
+        acute_loads = [w["acute_load"] for w in wellness if w.get("acute_load")]
+        current_load = acute_loads[0] if acute_loads else None
+        avg_load     = round(sum(acute_loads) / len(acute_loads), 0) if acute_loads else None
+
+        hrv_values = [w["hrv_rmssd"] for w in wellness if w.get("hrv_rmssd")]
+        avg_hrv    = round(sum(hrv_values) / len(hrv_values), 0) if hrv_values else None
+        latest_hrv = hrv_values[0] if hrv_values else None
+
+        lines = [f"Training stats — last 7 days ({date.today().strftime('%d %b')})", ""]
+
+        if runs:
+            lines.append(f"Running: {len(runs)} sessions, {total_run_km}km, {total_run_hrs}")
+        if rides:
+            lines.append(f"Riding: {len(rides)} sessions, {total_ride_km}km, {total_ride_hrs}")
+        if gym:
+            lines.append(f"Gym: {len(gym)} sessions, {total_gym_vol:.0f}kg total volume")
+        if not runs and not rides and not gym:
+            lines.append("No sessions recorded this week.")
+
+        lines.append("")
+        if current_load and avg_load:
+            trend = "up" if current_load > avg_load else "down"
+            lines.append(f"Acute load: {current_load:.0f} (7-day avg {avg_load:.0f}, trending {trend})")
+        if latest_hrv and avg_hrv:
+            lines.append(f"HRV: {latest_hrv:.0f}ms today (7-day avg {avg_hrv:.0f}ms)")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"Stats build failed: {e}")
+        return "Could not build stats — try again shortly."
+
+def build_progression(db):
+    try:
+        ninety_days_ago = (date.today() - timedelta(days=90)).isoformat()
+        four_weeks_ago  = (date.today() - timedelta(days=28)).isoformat()
+
+        activities = db.table("activities").select(
+            "date, distance_km, avg_pace_min_km, sport_type, name"
+        ).in_("sport_type", ["running", "trail_running"]).gte(
+            "date", ninety_days_ago
+        ).order("date").execute().data
+
+        def pace_to_seconds(pace):
+            if not pace:
+                return None
+            try:
+                mins, secs = divmod(float(pace) * 60, 60)
+                return int(mins) * 60 + int(secs)
+            except Exception:
+                return None
+
+        distance_buckets = {
+            "5k":            (4.8,  5.2),
+            "10k":           (9.5,  10.5),
+            "Half marathon": (20.5, 21.5),
+            "Marathon":      (41.5, 42.5),
+        }
+
+        pb_lines = []
+        for label, (lo, hi) in distance_buckets.items():
+            matches = [
+                a for a in activities
+                if a.get("distance_km") and lo <= a["distance_km"] <= hi
+                and a.get("avg_pace_min_km")
+            ]
+            if matches:
+                best = min(matches, key=lambda a: pace_to_seconds(a["avg_pace_min_km"]))
+                pace = best["avg_pace_min_km"]
+                mins = int(pace)
+                secs = int((pace - mins) * 60)
+                pb_lines.append(f"{label}: {mins}:{secs:02d}/km on {best['date']}")
+
+        all_ex = db.table("gym_exercises").select(
+            "exercise_name, max_weight_kg, date"
+        ).gte("date", ninety_days_ago).order("date").execute().data
+
+        recent_ex = [e for e in all_ex if e["date"] >= four_weeks_ago]
+        older_ex  = [e for e in all_ex if e["date"] < four_weeks_ago]
+
+        by_name_recent = {}
+        for e in recent_ex:
+            name = e.get("exercise_name")
+            w    = e.get("max_weight_kg") or 0
+            if name and w > 0:
+                if name not in by_name_recent or w > by_name_recent[name]:
+                    by_name_recent[name] = w
+
+        by_name_older = {}
+        for e in older_ex:
+            name = e.get("exercise_name")
+            w    = e.get("max_weight_kg") or 0
+            if name and w > 0:
+                if name not in by_name_older or w > by_name_older[name]:
+                    by_name_older[name] = w
+
+        gym_lines = []
+        for name, recent_weight in by_name_recent.items():
+            older_weight = by_name_older.get(name)
+            if older_weight and recent_weight > older_weight:
+                diff = round(recent_weight - older_weight, 1)
+                gym_lines.append(f"{name}: {older_weight}kg → {recent_weight}kg (+{diff}kg)")
+
+        gym_lines.sort(key=lambda x: float(x.split("+")[1].replace("kg)", "").replace("kg", "")), reverse=True)
+
+        lines = [f"Progression — last 90 days ({date.today().strftime('%d %b')})", ""]
+
+        if pb_lines:
+            lines.append("Running PBs (best avg pace by distance):")
+            lines.extend([f"- {l}" for l in pb_lines])
+        else:
+            lines.append("No running PBs found in last 90 days.")
+
+        lines.append("")
+
+        if gym_lines:
+            lines.append("Gym — exercises getting stronger (last 4 weeks vs before):")
+            lines.extend([f"- {l}" for l in gym_lines[:10]])
+        else:
+            lines.append("No gym progression found yet — keep logging!")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"Progression build failed: {e}")
+        return "Could not build progression — try again shortly."
+
 @app.route("/sync", methods=["GET"])
 def trigger_sync():
     if not check_sync_auth():
@@ -809,6 +996,16 @@ def sync_specific_date():
     sync_trainingpeaks()
     sync_hevy(db, target_date=target)
     return f"Sync done for {d}", 200
+
+@app.route("/import-stretches", methods=["GET"])
+def import_stretches():
+    if not check_sync_auth():
+        return "Unauthorised", 401
+    db = get_supabase()
+    count, error = import_stretch_library(db)
+    if error:
+        return f"Import failed: {error}", 500
+    return f"Stretch library imported — {count} exercises stored", 200
 
 @app.route("/backfill", methods=["GET"])
 def backfill():
@@ -958,11 +1155,12 @@ def telegram():
             "/refresh-library — update cached Hevy exercise library\n"
             "/clear — clear conversation history\n"
             "/help — show this message\n\n"
-            "Gym session types you can request:\n"
+            "Gym session types:\n"
             "- Push, Pull, Legs, Upper Body, Full Body\n"
-            "- Running Maintenance (plyometrics + explosive work)\n"
-            "- Pre Run (low DOMS risk, activation focus)\n"
-            "- Post Run (no plyometrics, steady strength)\n\n"
+            "- Running Maintenance, Pre Run, Post Run\n\n"
+            "Stretching routines:\n"
+            "- Pre Run Stretch, Post Run Stretch, Mobility\n"
+            "- Specify duration e.g. 'make me a 20 min post run stretch'\n\n"
             "Or just ask me anything about your training!"
         )
         send_telegram(chat_id, help_text)
@@ -991,13 +1189,44 @@ def telegram():
         "suggest a gym", "gym session", "suggest a session", "create a routine",
         "make a routine", "plan a workout", "suggest a workout", "gym workout",
         "pre run", "post run", "running maintenance", "upper body", "leg day",
-        "push session", "pull session", "full body session"
+        "push session", "pull session", "full body session",
+        "stretching routine", "stretch routine", "mobility session",
+        "pre run stretch", "post run stretch", "make me a stretch",
+        "stretching session", "flexibility routine", "make me a stretching",
+        "mobility routine", "10 min stretch", "20 min stretch", "30 min stretch",
+        "10 minute stretch", "20 minute stretch", "30 minute stretch",
     ])
 
     if is_routine_request:
         detected_type = detect_session_type(user_msg)
         session_date  = detect_session_date(user_msg)
 
+        # --- Stretching routine path ---
+        if detected_type in STRETCH_CONTEXT_MAP:
+            context_type   = STRETCH_CONTEXT_MAP[detected_type]
+            duration_mins  = detect_stretch_duration(user_msg)
+
+            send_telegram(chat_id, f"Building your {duration_mins} min {detected_type.lower()} routine...")
+
+            exercises, new_exercises = build_stretch_routine(db, context_type, duration_mins, user_msg)
+
+            if not exercises:
+                send_telegram(chat_id, "No stretches found in the library. Run /import-stretches first to populate the stretch library.")
+                return "ok", 200
+
+            title = f"{detected_type} {duration_mins}min - {session_date}"
+
+            _pending_routine = {
+                "title":     title,
+                "folder_id": None,
+                "exercises": exercises,
+            }
+
+            reply = format_routine_for_telegram(_pending_routine, set(new_exercises) if new_exercises else None)
+            send_telegram(chat_id, reply)
+            return "ok", 200
+
+        # --- Gym routine path ---
         full_library_summary = get_cached_exercise_library(db)
         if not full_library_summary:
             full_library_summary = [
