@@ -253,14 +253,12 @@ def create_hevy_stretch_exercises(db):
             "Content-Type": "application/json"
         }
 
-        # Get all stretches from Supabase
         stretches = db.table("stretch_exercises").select("*").execute().data
 
         created  = []
         skipped  = []
         failed   = []
 
-        # Get existing Hevy cache to avoid duplicates
         existing = db.table("hevy_exercise_cache").select("title").execute().data
         existing_titles = {e["title"].lower() for e in existing}
 
@@ -269,7 +267,6 @@ def create_hevy_stretch_exercises(db):
             if not name:
                 continue
 
-            # Skip if already in Hevy cache
             if name.lower() in existing_titles:
                 skipped.append(name)
                 continue
@@ -293,7 +290,6 @@ def create_hevy_stretch_exercises(db):
                         data.get("id")
                     )
                     if template_id:
-                        # Store in hevy_exercise_cache immediately
                         db.table("hevy_exercise_cache").upsert({
                             "exercise_template_id": template_id,
                             "title":                name,
@@ -301,23 +297,22 @@ def create_hevy_stretch_exercises(db):
                         }, on_conflict="exercise_template_id").execute()
                         created.append(name)
                     else:
-                        failed.append(name)
+                        failed.append(f"{name}: created but no template_id returned — {data}")
                 else:
-                    print(f"Failed to create {name}: {response.status_code} {response.text}")
-                    failed.append(name)
+                    failed.append(f"{name}: {response.status_code} {response.text}")
 
-                time.sleep(0.3)  # avoid rate limiting
+                time.sleep(0.3)
 
             except Exception as e:
-                print(f"Error creating {name}: {e}")
-                failed.append(name)
+                failed.append(f"{name}: exception — {str(e)}")
 
+        sample_failures = failed[:3]
         print(f"Stretch exercises — created: {len(created)}, skipped: {len(skipped)}, failed: {len(failed)}")
-        return created, skipped, failed
+        return created, skipped, failed, sample_failures
 
     except Exception as e:
         print(f"create_hevy_stretch_exercises failed: {e}")
-        return [], [], []
+        return [], [], [], [str(e)]
         
 def get_cached_exercise_library(db):
     try:
@@ -1144,11 +1139,12 @@ def create_stretch_exercises_route():
     if not check_sync_auth():
         return "Unauthorised", 401
     db = get_supabase()
-    created, skipped, failed = create_hevy_stretch_exercises(db)
+    created, skipped, failed, sample_failures = create_hevy_stretch_exercises(db)
     return (
         f"Done — created: {len(created)}, "
-        f"skipped (already exist): {len(skipped)}, "
-        f"failed: {len(failed)}"
+        f"skipped: {len(skipped)}, "
+        f"failed: {len(failed)}\n\n"
+        f"Sample failures:\n" + "\n".join(sample_failures)
     ), 200
     
 @app.route("/backfill", methods=["GET"])
